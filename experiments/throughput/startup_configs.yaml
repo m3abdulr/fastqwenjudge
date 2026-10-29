@@ -1,0 +1,30 @@
+# Start-up only: does the server come up, and how much KV cache is left after the weights and profiling.
+# Stock vLLM first, then the single flags a user would reach for, then the tuned profile and its variants.
+- name: stock
+  profile: configs/servers/default.yaml
+- name: stock, gpu-memory-utilization 0.95   # what the start-up error message suggests
+  profile: configs/servers/default.yaml
+  set: {gpu-memory-utilization: 0.95}
+- name: stock, max-model-len 6144
+  profile: configs/servers/default.yaml
+  set: {max-model-len: 6144}
+- name: stock, no video inputs
+  profile: configs/servers/default.yaml
+  set: {limit-mm-per-prompt: {"image": 1, "video": 0}}
+- name: stock, no video inputs, max-model-len 6144   # smallest change that starts
+  profile: configs/servers/default.yaml
+  set: {limit-mm-per-prompt: {"image": 1, "video": 0}, max-model-len: 6144}
+- name: tuned
+  profile: configs/servers/tuned.yaml
+- name: tuned, max-num-batched-tokens 4096
+  profile: configs/servers/tuned.yaml
+  set: {max-num-batched-tokens: 4096}
+- name: tuned, max-num-batched-tokens 16384
+  profile: configs/servers/tuned.yaml
+  set: {max-num-batched-tokens: 16384}
+- name: tuned, gpu-memory-utilization 0.97
+  profile: configs/servers/tuned.yaml
+  set: {gpu-memory-utilization: 0.97}
+- name: tuned, fp8 kv cache
+  profile: configs/servers/tuned.yaml
+  set: {kv-cache-dtype: fp8}

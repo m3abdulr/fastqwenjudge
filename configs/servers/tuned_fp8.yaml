@@ -1,0 +1,13 @@
+# The tuned profile with Qwen's FP8 checkpoint (block-quantized weights, ~33 GiB instead of 62.6 GiB). The
+# freed memory goes to the KV cache, so far more requests run at once and max-num-seqs is raised to match.
+# FP8 weights change the model's outputs slightly; compare verdicts against the BF16 profile before relying on it.
+model: Qwen/Qwen3-VL-32B-Instruct-FP8
+args:
+  generation-config: vllm
+  gpu-memory-utilization: 0.95
+  max-model-len: 6144
+  max-num-seqs: 256
+  max-num-batched-tokens: 8192
+  limit-mm-per-prompt: {"image": 1, "video": 0}
+  mm-processor-kwargs: {"min_pixels": 16384, "max_pixels": 1048576}
+  mm-processor-cache-gb: 0

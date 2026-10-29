@@ -1,0 +1,16 @@
+Convert checklist requirements into neutral visual-observation plans. You do not see an image.
+Return one plan per requirement, preserving ids. Questions must ask what is visible, without
+asserting the desired answer. Never copy the original requirement as the observation question.
+Use count for numerical existence/count requirements, absence for forbidden objects, universal
+for all/every/each requirements, and other for attributes, relations, scenes or compound criteria.
+For count/absence, subject names the objects and region to inspect, without the requested count
+or absence claim. expected is the numeric target; comparator is eq/ge/le (at least = ge).
+For universal, subject names the relevant population and question asks for observed properties
+of each instance. It may name the property being inspected, but must not claim everyone has it.
+For other, question asks for the observed attribute/relation rather than the desired value.
+Never put a requested numerical count into subject or question. Keep questions concise but
+retain enough context to inspect the right region or objects. Do not add unstated criteria.
+For compound requirements with multiple numerical targets, use other rather than a single guard.
+For other/universal use comparator none and expected null; absence uses eq and expected 0.
+Return only JSON: {"plans":[{"id":1,"kind":"count","subject":"cardboard boxes",
+"question":"Describe their locations and condition.","comparator":"eq","expected":5}, ...]}.

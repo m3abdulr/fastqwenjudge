@@ -1,0 +1,24 @@
+# Fast mode: the neutral judge (compile / observe / decide, three requests per image) on Qwen3-VL-32B-Instruct in
+# Qwen's FP8 checkpoint. One H100: 431 s for the 1,000-image round-3 held-out set; 3.76 images/s on 3,800 images of
+# the final evaluation set (1,011 s, measured before the output limit grew with the checklist); docs/serving.md has
+# how each setting was measured.
+model: Qwen/Qwen3-VL-32B-Instruct-FP8
+env:
+  FQJ_FUSED_KERNELS: 1            # fused RMSNorm / SiLU + FP8 quantization in the decoder layers (kernels/qwen3vl.py)
+  FQJ_FP8_LM_HEAD: 1              # the output layer in block FP8 too
+  VLLM_DISABLE_COMPILE_CACHE: 1   # vLLM's compile cache does not know about the patched layers
+args:
+  generation-config: vllm
+  gpu-memory-utilization: 0.95
+  max-model-len: 16384           # a decide request for 50 statements carries all 50 observations
+  max-num-seqs: 256
+  max-num-batched-tokens: 8192
+  limit-mm-per-prompt: {"image": 1, "video": 0}
+  mm-processor-kwargs: {"min_pixels": 16384, "max_pixels": 1048576}
+  mm-processor-cache-gb: 0
+  kv-cache-dtype: fp8
+  attention-backend: FLASHINFER
+  async-scheduling: true
+  # n-gram drafts while <= 96 requests run; above that, checking drafts costs more compute than it saves
+  speculative-config: {"method": "ngram_gpu", "num_speculative_tokens": 3, "prompt_lookup_min": 2,
+                       "prompt_lookup_max": 5, "num_speculative_tokens_per_batch_size": [[1, 96, 3], [97, 256, 0]]}

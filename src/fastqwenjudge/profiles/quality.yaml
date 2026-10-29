@@ -1,0 +1,23 @@
+# Quality mode: one request per image on Qwen3-VL-32B-Thinking in Qwen's FP8 checkpoint; the model reasons, then
+# answers with the verdict list. One H100: 497 s for the 1,000-image round-3 held-out set (2.01 images/s); see
+# docs/serving.md.
+model: Qwen/Qwen3-VL-32B-Thinking-FP8
+args:
+  generation-config: vllm
+  gpu-memory-utilization: 0.95
+  max-model-len: 20480            # prompt + image (~1.5k tokens) + up to 16,384 tokens of reasoning and answer
+  max-num-seqs: 128               # more in flight fills the KV cache and only queues
+  max-num-batched-tokens: 8192
+  limit-mm-per-prompt: {"image": 1, "video": 0}
+  mm-processor-kwargs: {"min_pixels": 16384, "max_pixels": 1048576}
+  mm-processor-cache-gb: 0
+  kv-cache-dtype: fp8
+  attention-backend: FLASHINFER
+  async-scheduling: true
+  reasoning-parser: qwen3         # the JSON schema applies to the answer after the reasoning
+  # what the server writes when a request's thinking budget runs out (the quality judge sends 8,192 tokens): it ends
+  # the reasoning and the model answers. Chains that loop stop there instead of at the output limit.
+  reasoning-config: {"reasoning_end_str": "\n\nConsidering the limited time, I have to give the final answer based on my thinking so far.\n</think>\n\n"}
+  # n-gram drafts only while <= 16 requests run (the batch's tail of long reasoning chains)
+  speculative-config: {"method": "ngram_gpu", "num_speculative_tokens": 3, "prompt_lookup_min": 2,
+                       "prompt_lookup_max": 5, "num_speculative_tokens_per_batch_size": [[1, 16, 3], [17, 512, 0]]}

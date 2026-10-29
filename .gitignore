@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.egg-info/
+.ruff_cache/
+logs/
+wandb/
+# raw outputs of every experiment (per-image verdicts, reference labels, audit verdicts, run logs); the aggregate
+# tables and figures are in docs/
+experiments/**/results/
+experiments/speculator/data/

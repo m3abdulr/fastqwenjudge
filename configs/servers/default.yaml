@@ -1,0 +1,5 @@
+# vLLM as it comes. The only flag makes the server ignore the checkpoint's default sampling parameters,
+# so every profile decodes exactly the same way (greedy, no repetition penalty).
+model: Qwen/Qwen3-VL-32B-Instruct
+args:
+  generation-config: vllm
