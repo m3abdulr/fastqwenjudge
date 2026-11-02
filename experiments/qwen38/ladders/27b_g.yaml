@@ -1,0 +1,21 @@
+# VOID: the node's GPU ran throttled (950-1,300 MHz); the same rungs were rerun as part G2 (results folder 27b_g2,
+# no separate config), which docs/serving.md cites.
+# 27B serving ladder, part G (one H100): cheap settings on the kept profile (profiles/27b.yaml), with the fast and
+# quality modes' requests (thinking off with log-probabilities; medium thinking, strict prompt). Requests without a
+# per-request seed (vLLM samples seeded requests one at a time and falls back from FlashInfer's sampler); more MTP
+# drafts while few requests run (the batch's tail); the prefill chunk size (the fast mode is prompt-bound).
+profile: 27b
+data: q38_dev600.jsonl
+judges: [off_greedy_strict, think_medium_strict]
+rungs:
+  - name: kept
+  - name: noseed
+    seed: null
+  - name: mtp_tail5               # 5 drafts at 1-16 running, 3 above
+    set: {speculative-config: {"method": "mtp", "num_speculative_tokens": 5,
+                               "num_speculative_tokens_per_batch_size": [[1, 16, 5], [17, 64, 3]]}}
+  - name: batched16k
+    set: {max-num-batched-tokens: 16384}
+  - name: batched4k
+    set: {max-num-batched-tokens: 4096}
+  - name: kept_again              # anchor repeated: node drift

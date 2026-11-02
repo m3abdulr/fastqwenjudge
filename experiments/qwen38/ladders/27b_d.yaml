@@ -1,0 +1,23 @@
+# 27B serving ladder, part D (one H100): around part C's winner (BF16 DeltaNet state + at most 64 sequences: thinking
+# 2,809 vs ~2,200 generated tokens/s, no preemption, agreement unchanged), measured with the candidate judges:
+# thinking off greedy with p_true (the fast candidate; also checks that its cut-off holds on new numerics), and
+# thinking medium / xhigh with the strict prompt.
+profile: experiments/qwen38/profiles/27b_start.yaml
+data: q38_dev600.jsonl
+judges: [off_greedy, think_medium_strict, think_xhigh_strict]
+rungs:
+  - name: noprefix                # the old anchor, for the candidate judges
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true}
+  - name: bf16_s64
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16,
+          max-num-seqs: 64}
+  - name: bf16_s64_fis            # + FlashInfer's sampling kernels (part C: +4% on its own, within noise)
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16,
+          max-num-seqs: 64}
+    env: {VLLM_USE_FLASHINFER_SAMPLER: 1}
+  - name: bf16_s56
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16,
+          max-num-seqs: 56}
+  - name: bf16_s80_mem95          # more cache, a higher cap
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16,
+          max-num-seqs: 80, gpu-memory-utilization: 0.95}

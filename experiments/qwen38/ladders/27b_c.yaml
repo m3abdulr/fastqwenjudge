@@ -1,0 +1,23 @@
+# 27B serving ladder, part C (one H100), after parts A and B and the profile (docs/serving.md): the thinking judge
+# generates ~2,200-2,300 tokens/s whatever the memory settings, its requests get preempted 57-179 times per 600-image
+# batch (recomputed from scratch), and the profile puts 26% of GPU time in the DeltaNet decode kernel for drafted
+# tokens (float32 state written for each draft position) and 5% in seeded top-k/top-p sampling.
+profile: experiments/qwen38/profiles/27b_start.yaml
+data: q38_dev600.jsonl
+judges: [single_off, think_on]
+rungs:
+  - name: noprefix                # anchor (parts A and B: 114-119 s / 396-404 s)
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true}
+  - name: noprefix_seqs48         # admit only what the cache holds: no preemption, no recomputation
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, max-num-seqs: 48}
+  - name: bf16state_seqs64        # half the state traffic and room for more requests, still capped
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16,
+          max-num-seqs: 64}
+  - name: bf16state_mtp1_seqs96   # one draft: two state positions written instead of four
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16,
+          max-num-seqs: 96, speculative-config: {"method": "mtp", "num_speculative_tokens": 1}}
+  - name: noprefix_fisampler      # FlashInfer's sampling kernels (the env file turns them off for Qwen3-VL)
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true}
+    env: {VLLM_USE_FLASHINFER_SAMPLER: 1}
+  - name: defaults                # vLLM's defaults with max-num-seqs 512 (1,024 does not start)
+    profile: experiments/qwen38/profiles/27b_defaults.yaml

@@ -1,0 +1,17 @@
+# Correction (2026-10-31): the ~15% below came from an 8-s profile and a roofline model without the draft head's and
+# the vision tower's attention. Over a whole batch, attention takes 14.0 s against 3.5 s at the roofline, at 66% of
+# what FlashAttention 3 reaches alone here (about 40% of the bandwidth; docs/roofline.md).
+# 27B serving ladder, part I (one H100): attention. At the kept settings FlashAttention 3 (FP8 KV, head size 256, 4 KV
+# heads) runs decode attention at ~15% of its memory roofline (13% of the thinking judge's GPU time). FlashInfer's
+# kernels instead (part B tried them on the old, preempting settings), and FlashAttention with more KV splits per
+# request under CUDA graphs (the default caps them at 32).
+profile: 27b
+data: q38_dev600.jsonl
+judges: [off_greedy_strict, think_medium_strict]
+rungs:
+  - name: kept
+  - name: flashinfer
+    set: {attention-backend: FLASHINFER}
+  - name: fa_splits128
+    set: {attention-config.flash_attn_max_num_splits_for_cuda_graph: 128}
+  - name: kept_again

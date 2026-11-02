@@ -1,0 +1,18 @@
+# 27B serving ladder, part B (one H100): draft length and attention kernel, against the baseline without prefix
+# caching (repeated here as the anchor, since part A runs on another node).
+profile: experiments/qwen38/profiles/27b_start.yaml
+data: q38_dev600.jsonl
+judges: [single_off, think_on]
+rungs:
+  - name: noprefix
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true}
+  - name: noprefix_nospec
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, speculative-config: null}
+  - name: noprefix_mtp1
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true,
+          speculative-config: {"method": "mtp", "num_speculative_tokens": 1}}
+  - name: noprefix_mtp2
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true,
+          speculative-config: {"method": "mtp", "num_speculative_tokens": 2}}
+  - name: noprefix_flashinfer
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, attention-backend: FLASHINFER}

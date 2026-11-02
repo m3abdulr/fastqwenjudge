@@ -1,5 +1,5 @@
 """Start and stop a local vLLM server from a YAML profile (the modes' profiles ship in profiles/; the serving
-experiments' are in configs/servers/)."""
+experiments' are in experiments/qwen38/profiles/)."""
 from __future__ import annotations
 
 import json
@@ -26,7 +26,7 @@ def free_port() -> int:
 
 
 def load_profile(path: str | Path, overrides: dict | None = None) -> dict:
-    """A profile YAML file, or the name of one shipped with the package ("fast", "quality")."""
+    """A profile YAML file, or the name of one shipped with the package ("27b", "flash_next")."""
     source = Path(path)
     if source.exists():
         profile = yaml.safe_load(source.read_text())
@@ -96,16 +96,26 @@ class Server:
         return self.process is not None and self.process.poll() is None
 
     def stop(self):
-        if self.process is not None and self.process.poll() is None:
+        """Stop the server and every process it started (with tensor parallelism, one worker per GPU), so the GPUs'
+        memory is free when this returns."""
+        if self.process is not None:
+            group = self.process.pid   # the server leads its own process group (start_new_session)
             for sig in (signal.SIGTERM, signal.SIGKILL):
                 try:
-                    os.killpg(self.process.pid, sig)
-                    self.process.wait(timeout=60)
-                    break
+                    os.killpg(group, sig)
                 except ProcessLookupError:
                     break
-                except subprocess.TimeoutExpired:
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    self.process.poll()
+                    try:
+                        os.killpg(group, 0)   # raises once no process of the group is left
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.5)
+                else:
                     continue
+                break
         self.process = None
 
     def __enter__(self):
@@ -141,15 +151,20 @@ class Server:
 
 
 class Replicas:
-    """One server per GPU, each with its own copy of the model and its own API process, started in parallel. The
-    Client spreads requests over `base_url` (a list), so this scales out without vLLM's data-parallel mode, whose
-    single API process does the tokenization and image preprocessing for every replica."""
+    """One server per group of GPUs (as many as the profile's tensor-parallel-size), each with its own copy of the
+    model and its own API process, started in parallel. The Client spreads requests over `base_url` (a list), so
+    this scales out without vLLM's data-parallel mode, whose single API process does the tokenization and image
+    preprocessing for every replica."""
 
     def __init__(self, profile: dict, gpus: list[str], model: str | None = None, log_dir: str | Path = "logs"):
-        self.profile = {**profile, "replicas": len(gpus)}
-        self.servers = [Server({**profile, "name": f"{profile['name']}_gpu{gpu}",
-                                "env": {**profile.get("env", {}), "CUDA_VISIBLE_DEVICES": gpu}}, model, log_dir)
-                        for gpu in gpus]
+        size = int(profile["args"].get("tensor-parallel-size", 1))
+        if not gpus or len(gpus) % size:
+            raise ValueError(f"{profile['name']} runs on {size} GPU(s) per server; got GPUs {gpus}")
+        groups = [",".join(gpus[i:i + size]) for i in range(0, len(gpus), size)]
+        self.profile = {**profile, "replicas": len(groups)}
+        self.servers = [Server({**profile, "name": f"{profile['name']}_gpu{group.replace(',', '-')}",
+                                "env": {**profile.get("env", {}), "CUDA_VISIBLE_DEVICES": group}}, model, log_dir)
+                        for group in groups]
         self.served_name = self.servers[0].served_name
 
     @property

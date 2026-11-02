@@ -1,0 +1,21 @@
+# Flash-Next NVFP4 serving ladder, part H (two H100s): the cap per replica for data parallel + expert parallel (two
+# one-GPU replicas sharing the experts), which part F2 found 11% faster on the fast mode at 64 per replica (with
+# evictions) and 4% slower on quality. Steady state as in part G; tensor parallel at 96 first, as the anchor
+# across nodes (identical settings measured 25% apart on two different jobs; within one job, 1%).
+profile: flash_next
+data: q38_dev.jsonl
+judges: [off_greedy, think_medium_strict]
+steady: {concurrency: 192, warmup: 120, seconds: 240}
+rungs:
+  - name: tp2_s96
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: dp2ep_s32
+    set: {tensor-parallel-size: 1, data-parallel-size: 2, gpu-memory-utilization: 0.92, max-num-seqs: 32}
+  - name: dp2ep_s40
+    set: {tensor-parallel-size: 1, data-parallel-size: 2, gpu-memory-utilization: 0.92, max-num-seqs: 40}
+  - name: dp2ep_s48
+    set: {tensor-parallel-size: 1, data-parallel-size: 2, gpu-memory-utilization: 0.92, max-num-seqs: 48}
+  - name: dp2ep_s56
+    set: {tensor-parallel-size: 1, data-parallel-size: 2, gpu-memory-utilization: 0.92, max-num-seqs: 56}
+  - name: dp2ep_s64
+    set: {tensor-parallel-size: 1, data-parallel-size: 2, gpu-memory-utilization: 0.92, max-num-seqs: 64}

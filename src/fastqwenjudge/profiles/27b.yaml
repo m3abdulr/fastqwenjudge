@@ -1,0 +1,19 @@
+# Qwen3.8-27B in Qwen's FP8 checkpoint on one H100, for the modes fast and quality. One server serves both: thinking
+# is switched per request. Each setting below is a measured step (docs/serving.md); vLLM's defaults do not start on
+# this model (1,024 sequences against 824 slots for the recurrent state).
+model: Qwen/Qwen3.8-27B-FP8
+args:
+  max-model-len: 36864              # prompt + image (~1.5-2k tokens) + up to 32,768 tokens of reasoning and answer
+  max-num-seqs: 64                  # the knee: past it, at most 2% more images/s for ~1.4x the time per image
+  mamba-ssm-cache-dtype: bfloat16   # the DeltaNet state in 16-bit; the config's float32 is 151 MB per request
+  no-enable-prefix-caching: true    # every request has its own image: little to share, and it costs cache
+  kv-cache-dtype: fp8
+  reasoning-parser: qwen3
+  # the closing line the server writes when a request's thinking budget runs out (judges/single.py)
+  reasoning-config: {"reasoning_end_str": "\n\nConsidering the limited time, I have to give the final answer based on my thinking so far.\n</think>\n\n"}
+  speculative-config: {"method": "mtp", "num_speculative_tokens": 3}   # the checkpoint's own drafter
+  limit-mm-per-prompt: {"image": 1, "video": 0}
+env:
+  FQJ_FP8_LM_HEAD: 1                # the 16-bit output layer in block FP8 (kernels/fp8_lm_head.py): 4% faster
+  FQJ_TOPK_TOPP: 1                  # top-k / top-p masks in three passes (kernels/topk_topp.py): +7% images/s, quality
+  VLLM_USE_FLASHINFER_SAMPLER: 0    # every number was measured with vLLM's own sampling kernels

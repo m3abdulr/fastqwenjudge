@@ -1,0 +1,23 @@
+# 27B serving ladder, part K (one H100): how many requests to run at once. Earlier parts compared caps only on one
+# batch's time (56 / 64 / 80 within noise; 128 evicted requests), never at a fixed load. Steady-state throughput
+# with more images in flight than any cap (so the server always has work queued), the cap swept at the profile's
+# memory share; the server's own histograms give the time each request spends running (latency without queueing).
+profile: 27b
+data: q38_dev.jsonl
+judges: [off_greedy_strict, think_medium_strict]
+steady: {concurrency: 192, warmup: 120, seconds: 240}
+rungs:
+  - name: s32
+    set: {max-num-seqs: 32}
+  - name: s48
+    set: {max-num-seqs: 48}
+  - name: s64
+  - name: s80
+    set: {max-num-seqs: 80}
+  - name: s96
+    set: {max-num-seqs: 96}
+  - name: s128
+    set: {max-num-seqs: 128}
+  - name: s96_m95
+    set: {max-num-seqs: 96, gpu-memory-utilization: 0.95}
+  - name: s64_again

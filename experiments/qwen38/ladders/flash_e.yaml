@@ -1,0 +1,17 @@
+# Flash-Next NVFP4 serving ladder, part E (two H100s): the thinking profile at 64 in flight puts 15% of GPU time in
+# tensor-parallel all-reduce (after every attention, DeltaNet and MoE block). Data parallel for the dense layers
+# instead (each GPU holds them whole and serves its own requests) with the experts still split across the GPUs
+# (expert parallel): tokens move only around the MoE layers. The n-gram table is shared between the two replicas in
+# host memory (vLLM's default when they share a node). Against part C's best (92% memory, at most 96 requests).
+profile: flash_next
+data: q38_dev600.jsonl
+judges: [off_greedy, think_medium_strict]
+rungs:
+  - name: tp2_m92_s96
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: dp2ep_s48
+    set: {tensor-parallel-size: 1, data-parallel-size: 2, gpu-memory-utilization: 0.92, max-num-seqs: 48}
+  - name: dp2ep_s64
+    set: {tensor-parallel-size: 1, data-parallel-size: 2, gpu-memory-utilization: 0.92, max-num-seqs: 64}
+  - name: tp2_m92_s96_again
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}

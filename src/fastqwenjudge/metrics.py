@@ -64,7 +64,7 @@ def compare(judge: dict[str, dict], reference: dict[str, dict], ids: list[str] |
         out["requirements"] = {"n": len(pairs), "judge": float(j.mean()), "reference": float(r.mean()),
                                "agreement": bootstrap(per_image), "kappa": kappa(j, r),
                                "false_pass": float(np.mean(j & ~r)), "false_fail": float(np.mean(~j & r))}
-    else:   # score-only judges (VQAScore): ranking quality against reference full success
+    else:   # judges that only score images: ranking quality against the reference's full success
         scores = np.array([judge[i]["score"] for i in ids], dtype=float)
         out["full_success"]["auroc"] = auroc(scores, full_r)
     return out

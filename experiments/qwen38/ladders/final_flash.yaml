@@ -1,0 +1,17 @@
+# Final run, Flash-Next NVFP4 (two H100s): the lineup frozen before the run (docs/results.md). The 0-10 judges first
+# on the development images (their pass mark), then every judge once on the held-out set, then one image at a time.
+profile: experiments/qwen38/profiles/flash_nvfp4_start.yaml
+judges: [off_greedy, think_medium_strict, score10_off, score10_medium]
+rungs:
+  - name: dev_score10
+    data: q38_dev.jsonl
+    judges: [score10_off, score10_medium]
+    set: &final {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16,
+                 max-num-seqs: 64}
+  - name: heldout
+    data: r3_everything.jsonl
+    set: *final
+  - name: latency
+    data: r3_lat30.jsonl
+    max_concurrency: 1
+    set: *final

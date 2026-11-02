@@ -1,0 +1,26 @@
+# Flash-Next NVFP4 serving ladder, part D (two H100s): part C's winner (92% of GPU memory, at most 96 requests: 13-17%
+# faster, verdict flips at rerun level) pushed further. Running requests are capped by memory, most of it the DeltaNet
+# state (one copy per draft position): more memory and more sequences, and two drafts instead of three (three state
+# copies per request instead of four). The thinking judge also on the 847 reasoning development images (long chains,
+# the batch's tail).
+profile: flash_next
+data: q38_dev600.jsonl
+judges: [off_greedy, think_medium_strict]
+rungs:
+  - name: kept
+  - name: m92_s96
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: m95_s128
+    set: {gpu-memory-utilization: 0.95, max-num-seqs: 128}
+  - name: m95_s128_mtp2
+    set: {gpu-memory-utilization: 0.95, max-num-seqs: 128,
+          speculative-config: {"method": "mtp", "num_speculative_tokens": 2}}
+  - name: m92_s96_again
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: reasoning_kept
+    data: r3_dev_reasoning.jsonl
+    judges: [think_medium_strict]
+  - name: reasoning_m92_s96
+    data: r3_dev_reasoning.jsonl
+    judges: [think_medium_strict]
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}

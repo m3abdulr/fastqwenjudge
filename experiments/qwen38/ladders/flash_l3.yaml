@@ -1,0 +1,32 @@
+# Flash-Next NVFP4 serving ladder, part L3 (two H100s): part L's steady-state pairs again.
+# Parts Q, Q2 (27B) and L, L2 (Flash-Next) were all started after the answer schema got a 4,000-character maxLength on
+# each evidence string (13:31): with any maxLength, xgrammar 0.2.8 builds each token's mask ~10x slower (224 against
+# 21 us a token, CPU), and the GPUs waited on it (65-90% busy instead of ~100%). Not node contention, as first
+# thought. The bound is gone (prompts.VERDICTS as before); these numbers are void.
+# Part L's notes:
+# Flash-Next NVFP4 serving ladder, part L (two H100s): the three-pass top-k / top-p mask (kernels/topk_topp.py,
+# FQJ_TOPK_TOPP=1), as 27B part O, which gained 5-9% in steady state. Part K's top-k first plugin (1.29 ms a call)
+# was 2-3% slower here; this kernel is 0.22-0.56 ms for 64-256 rows whatever the mask, against vLLM's 0.3-0.8 ms
+# unmasked and 2.2-5.2 ms masked. Quality mode only (flash-fast is greedy), at the shipped 92% / 96 sequences.
+# Steady state at 192 in flight first, then batches of the 600 development images for time and verdict flips, each
+# setting twice, alternating.
+# Result (GPU 92-95% busy): kept 3.53 / 3.68, three-pass 3.90 / 3.37 images/s: means +0.8%, spread
+# 8%. No gain beyond noise; Flash-Next keeps vLLM's mask.
+profile: flash_next
+data: q38_dev600.jsonl
+judges: [think_medium_strict]
+rungs:
+  - name: steady_kept
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 120, seconds: 240}
+  - name: steady_topk_topp
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 120, seconds: 240}
+    env: {FQJ_TOPK_TOPP: 1}
+  - name: steady_kept_again
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 120, seconds: 240}
+  - name: steady_topk_topp_again
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 120, seconds: 240}
+    env: {FQJ_TOPK_TOPP: 1}

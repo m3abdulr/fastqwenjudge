@@ -1,0 +1,20 @@
+# Flash-Next NVFP4 serving ladder, part A (two H100s): the 27B findings applied (its DeltaNet state is float32 too;
+# thinking runs had 85-88 preemptions per 1,447 images at ~51-54 running). Candidate judges: thinking off greedy with
+# p_true, thinking medium with the strict prompt.
+profile: experiments/qwen38/profiles/flash_nvfp4_start.yaml
+data: q38_dev600.jsonl
+judges: [off_greedy, think_medium_strict]
+rungs:
+  - name: base                    # the development runs' settings
+  - name: noprefix
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true}
+  - name: bf16_s64
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16,
+          max-num-seqs: 64}
+  - name: bf16_s80
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16,
+          max-num-seqs: 80}
+  - name: bf16_s64_fis
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16,
+          max-num-seqs: 64}
+    env: {VLLM_USE_FLASHINFER_SAMPLER: 1}

@@ -1,0 +1,22 @@
+# Flash-Next NVFP4 serving ladder, part G (two H100s): how many requests to run at once, tensor parallel at the 92%
+# memory share. Parts A-D compared caps only on one batch's time; 128 failed to start at 95% with three drafts.
+# Steady-state throughput with more images in flight than any cap; the cap swept; 96 (the current pick) twice.
+profile: flash_next
+data: q38_dev.jsonl
+judges: [off_greedy, think_medium_strict]
+steady: {concurrency: 192, warmup: 120, seconds: 240}
+rungs:
+  - name: s48
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 48}
+  - name: s64
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 64}
+  - name: s80
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 80}
+  - name: s96
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: s112
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 112}
+  - name: s128
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 128}
+  - name: s96_again
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}

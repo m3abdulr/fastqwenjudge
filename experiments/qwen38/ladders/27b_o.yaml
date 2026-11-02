@@ -1,0 +1,41 @@
+# Correction (2026-10-31): the 11% below came from an 8-s profile; over a whole batch vLLM's kernel took 7.8 s of
+# 166 (about 5%; docs/roofline.md).
+# 27B serving ladder, part O (one H100): top-k / top-p masking that does not depend on the logits
+# (kernels/topk_topp.py, FQJ_TOPK_TOPP=1). vLLM's Triton kernel (Qrita) takes 2.1-2.9 ms on a step's mix of reasoning
+# rows and rows the answer's JSON grammar has masked (2.5-5.2 ms fully masked, 0.3-0.7 unmasked;
+# experiments/qwen38/ceilings.py); in the quality profile it is 2.2-3.0 ms a step, 11% of GPU time. The three-pass
+# kernel takes 0.19 / 0.25 / 0.40 ms at 64 / 128 / 256 rows whatever the mask, with vLLM's masks (ties: exactly k,
+# lowest ids first; tested against vLLM's on a GPU). Quality judge only (the fast mode is greedy). Steady state at
+# 192 in flight first (the steadier measure), then batches of the 600 development images for time and verdict flips,
+# each setting twice, alternating.
+# Result: steady state 3.08 / 2.97 images/s kept, 3.24 / 3.22 three-pass (+7%; +5% tokens/s); batches
+# 170 / 184 s kept, 175 / 177 s three-pass (the expected ~7 s is below the 14 s between identical batches); flips 3.8-4.5%
+# against 4.0% between the kept runs. Shipped in profiles/27b.yaml.
+profile: 27b
+data: q38_dev600.jsonl
+judges: [think_medium_strict]
+rungs:
+  - name: steady_kept
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 120, seconds: 240}
+  - name: steady_topk_topp
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 120, seconds: 240}
+    env: {FQJ_TOPK_TOPP: 1}
+  - name: steady_kept_again
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 120, seconds: 240}
+  - name: steady_topk_topp_again
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 120, seconds: 240}
+    env: {FQJ_TOPK_TOPP: 1}
+  - name: kept
+    objective: makespan
+  - name: topk_topp
+    objective: makespan
+    env: {FQJ_TOPK_TOPP: 1}
+  - name: kept_again
+    objective: makespan
+  - name: topk_topp_again
+    objective: makespan
+    env: {FQJ_TOPK_TOPP: 1}

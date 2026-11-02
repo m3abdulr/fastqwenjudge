@@ -1,0 +1,17 @@
+# Qwen3.8-27B in Qwen's FP8 checkpoint on one H100, as the serving ladder found it: vLLM's recipe for the model (FP8
+# KV cache, qwen3 reasoning parser, the checkpoint's MTP drafts) and nothing carried over from the Qwen3-VL release
+# (no fused kernels, FP8 output layer, n-gram drafts or pixel limits: the model's own image defaults give 1024x1024
+# images the same 1,024 image tokens). The ladders in ../ladders/ change it one step at a time; the result is the
+# package's profiles/27b.yaml.
+model: Qwen/Qwen3.8-27B-FP8
+args:
+  max-model-len: 36864            # prompt + image (~1.5-2k tokens) + up to 32,768 tokens of reasoning and answer
+  # each request holds a 151 MB float32 DeltaNet state (48 layers x 48 heads x 128 x 128)
+  max-num-seqs: 128
+  kv-cache-dtype: fp8
+  enable-prefix-caching: true
+  reasoning-parser: qwen3
+  speculative-config: {"method": "mtp", "num_speculative_tokens": 3}
+  limit-mm-per-prompt: {"image": 1, "video": 0}
+env:
+  VLLM_USE_FLASHINFER_SAMPLER: 0    # as every run was measured (vLLM's own sampling kernels)

@@ -1,0 +1,10 @@
+# Qwen3.8-27B-FP8 on vLLM's defaults: the serving ladder's first rung. Only the reasoning parser is added (without it
+# a thinking reply's reasoning and answer arrive as one text, and the JSON schema would constrain the reasoning), and
+# max-num-seqs 512: vLLM's default of 1,024 does not start ("max_num_seqs (1024) exceeds available Mamba cache
+# blocks (824)").
+model: Qwen/Qwen3.8-27B-FP8
+args:
+  reasoning-parser: qwen3
+  max-num-seqs: 512
+env:
+  VLLM_USE_FLASHINFER_SAMPLER: 0    # as every run was measured (vLLM's own sampling kernels)

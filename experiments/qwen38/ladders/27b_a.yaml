@@ -1,0 +1,19 @@
+# 27B serving ladder, part A (one H100): vLLM defaults, the held-out baseline, then memory settings, each against the
+# baseline without prefix caching (0% hits on the held-out run; with it on, vLLM keeps DeltaNet snapshots in
+# 1,600-token blocks). Speed on the 600 regular development images with the fast and quality judges as frozen.
+profile: experiments/qwen38/profiles/27b_start.yaml
+data: q38_dev600.jsonl
+judges: [single_off, think_on]
+rungs:
+  - name: defaults
+    profile: experiments/qwen38/profiles/27b_defaults.yaml
+  - name: baseline
+  - name: noprefix
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true}
+  - name: noprefix_bf16state     # DeltaNet state 151 -> 75 MB per request; changes numerics
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16}
+  - name: noprefix_tokens8k      # vLLM warned that drafts cap a step at 2,048 scheduled tokens
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, max-num-batched-tokens: 8192}
+  - name: noprefix_seqs256       # room for more running requests, if memory allows
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, max-num-seqs: 256,
+          gpu-memory-utilization: 0.95}

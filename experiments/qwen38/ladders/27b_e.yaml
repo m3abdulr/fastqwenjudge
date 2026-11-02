@@ -1,0 +1,22 @@
+# 27B serving ladder, part E (one H100): drafters and weights found on the hub, on part
+# C/D's winner (BF16 DeltaNet state, at most 64 sequences). DSpark (Red Hat) and DFlash 2 (z-lab) draft 7 tokens per
+# step against MTP's 3; Red Hat's W4A16 checkpoint is 19.5 GB against 31 GB, which leaves room for more requests.
+profile: experiments/qwen38/profiles/27b_start.yaml
+data: q38_dev600.jsonl
+judges: [off_greedy, think_medium_strict]
+rungs:
+  - name: bf16_s64                # anchor: MTP 3
+    set: &win {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16,
+               max-num-seqs: 64}
+  - name: dspark7
+    set: {<<: *win, speculative-config: {"method": "dspark", "model": "RedHatAI/Qwen3.8-27B-speculator.dspark", "num_speculative_tokens": 7}}
+  - name: dflash7
+    set: {<<: *win, speculative-config: {"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 7}}
+  - name: dflash3                 # fewer drafts: cheaper verification at full load
+    set: {<<: *win, speculative-config: {"method": "dflash", "model": "z-lab/Qwen3.8-27B-DFlash2", "num_speculative_tokens": 3}}
+  - name: int4_s64                # Red Hat W4A16 GPTQ weights, MTP 3
+    model: RedHatAI/Qwen3.8-27B-INT4
+    set: *win
+  - name: int4_s96
+    model: RedHatAI/Qwen3.8-27B-INT4
+    set: {<<: *win, max-num-seqs: 96}

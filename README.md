@@ -1,75 +1,82 @@
 # FastQwenJudge
 
-Checklist judging of generated images with Qwen3-VL-32B on your own GPUs. You give it an image, the prompt it came
-from and a list of requirements; it returns a verdict and a line of evidence for every requirement.
+Checklist judging of generated images with Qwen3.8 on your own GPUs. You give it an image, the prompt it came from
+and a list of requirements; it returns a verdict and a line of evidence for every requirement.
 
-It exists because judging thousands of images against checklists is something a research group does every day,
-and the two usual options are both bad. A frontier API judge is accurate but costs dollars per thousand images and
-returns a batch in minutes to hours. A local VLM asked "is each requirement satisfied?" in one request is cheap
-but lenient: it tends to see what the requirement tells it to look for. FastQwenJudge is a local judge that stays
-close to the frontier judges (GPT-6 Sol, Gemini 3.1 Pro, and a blind audit by Claude Opus 5.5), served as fast as
-I could make it run on an H100.
+It supports my research on image generation rather than being the research itself: it lets me judge each change to
+a model against checklists in minutes, instead of paying frontier-API prices for every run. People in my research
+group use it for the same kind of work, and it is open source for anyone with GPUs, their own or rented, who wants to
+run their own judge.
 
-![Speed against agreement with GPT-6 Sol for the local judges](docs/figures/modes.png)
+Judging thousands of images against checklists is routine work for anyone training or evaluating an image generator.
+The usual options are an API judge, which is accurate but costs dollars per thousand images, or a local VLM, which is
+cheap but lenient: asked in one request whether each requirement holds, it tends to see what the requirement tells it
+to look for. FastQwenJudge is a local judge measured against three frontier references (GPT-6 Sol, Gemini 3.1 Pro, and
+a blind audit by Claude Opus 5.5) and served as fast as I could make it run on H100s. Its closest mode agrees with Sol
+on 92.3% of statements; on the 350 images Gemini also labelled it agrees with Sol on 93.0%, where Gemini and Sol agree
+on 93.4%. It costs $0.41 per thousand images, where Sol costs $5.51.
 
-## Two modes
+![Statement agreement with GPT-6 Sol against the price per 1,000 images](docs/figures/agreement_cost.png)
 
-| | `fast` | `quality` |
-|---|---|---|
-| Model | Qwen3-VL-32B-Instruct, FP8 | Qwen3-VL-32B-Thinking, FP8 |
-| How it judges | neutral grounding: three short requests, and the one that sees the image never sees the requirements | one request; the model reasons (up to 8,192 tokens), then answers |
-| 1,000 images on one H100 | 431 s (2.32 images/s) | 497 s (2.01 images/s) |
-| The same on vLLM's default settings | 665 s | 815 s |
-| One image alone (mean of 30) | 10.6 s | 8.7 s |
-| Cost per 1,000 images ($3/H100-hour) | $0.36 | $0.41 |
-| Statement agreement with GPT-6 Sol | 87.7% | 89.8% |
-| Full-image agreement with GPT-6 Sol | 81.0% | 82.2% |
-| Statement agreement with Gemini 3.1 Pro | 88.2% | 90.6% |
-| Statement agreement with the Claude Opus 5.5 audit | 84.8% | 83.8% |
-| Prompts that need reasoning: statement agreement with Sol | 74.5% | 81.4% |
-| Leniency: full-image pass rate minus Sol's | +3.4 points | +13.5 points |
+## Four modes
 
-The batch rows are 1,000 images that no part of the judge was tuned on, judged as one batch: 800 main-task images
-(FLUX-pool prompts, OpenGPT relation prompts, DiffusionDB, and five benchmarks) and 200 prompts that need reasoning
-(R2I-Bench and T2I-CoReBench). Each mode ran with its default settings (256 requests in flight for `fast`, 128 for
-`quality`); the row below it is the same checkpoint and requests on vLLM's default server settings, with only the
-flags needed to start (and, for `quality`, to parse the reasoning), and agreement within half a point of the shipped
-profiles. The agreement rows come from the pre-registered held-out run, where `fast` ran at 128 in flight with a
-fixed output limit and left 6 of the 800 main-task images (checklists of 24-50 statements) without a verdict; as it
-ships it judges 799 of them, at 87.4% statement agreement with Sol, and on the 794 both runs judged its agreement
-moved by -0.2 points [-0.7, +0.3] (see Limitations). The rows are on the main-task images (Gemini labels 350 of
-them, the audit 130), except the reasoning row, which is on the 200. "One image alone" is the mean over 30
-development images judged one at a time (the quality mode without the thinking budget). For reference, on the 350
-images Gemini labelled it agrees with Sol on 93.4% of statements, where the modes reach 89.0% and 90.8% ([how close,
-corrected for chance](docs/results.md#the-two-modes-on-the-round-3-held-out-set)); the audit agrees with Sol on
-89.6%, and the two API judges cost $5.51 and $5.84 per 1,000 of these images at batch prices: 13-16x the local
-modes. Their batch APIs returned these labels in 5-13 minutes per batch (the fast mode takes 7.2 for all 1,000);
-batch turnaround depends on the provider's queue, and both promise only 24 hours.
+Two models: **Qwen3.8-27B** in Qwen's FP8 checkpoint on one H100, and **Qwen3.8-Flash-Next** (a 125B mixture of
+experts, 6B parameters active per token) in NVIDIA's NVFP4 checkpoint on two. Each runs with its thinking off (fast)
+or at medium reasoning effort (quality). Every number in the table is from the same 1,000 held-out images (800
+main-task, 200 that need reasoning), with settings written down beforehand: agreement from the run of 2026-10-30,
+speed and cost from a timing-only run of the package's settings on 2026-10-31. The exception is one image alone: the
+mean over 30 development images, one at a time. Brackets are 95% bootstrap intervals.
 
-Pick `fast` for large sweeps and for RL rewards (it is the least lenient, so a policy has less to exploit). Pick
-`quality` for the numbers you report, and for prompts that need reasoning. Both take the same input and write the
-same output.
+| | `fast` | `quality` | `flash-fast` | `flash-quality` |
+|---|---|---|---|---|
+| Model | Qwen3.8-27B, FP8 | Qwen3.8-27B, FP8 | Qwen3.8-Flash-Next, NVFP4 | Qwen3.8-Flash-Next, NVFP4 |
+| GPUs | 1 H100 | 1 H100 | 2 H100s | 2 H100s |
+| How it judges | thinking off, strict prompt, pass only if P(true) >= 0.999 | medium reasoning, strict prompt | thinking off, plain prompt, pass only if P(true) >= 0.998 | medium reasoning, strict prompt |
+| 1,000 images | 177 s (5.64 images/s) | 295 s (3.39 images/s) | 121 s (8.26 images/s) | 249 s (4.02 images/s) |
+| One image alone | 1.6 s | 4.0 s | 1.3 s | 3.5 s |
+| Cost per 1,000 images ($3 per H100-hour) | $0.15 | $0.25 | $0.20 | $0.41 |
+| Generated tokens/s, whole batch (per GPU) | 1,687 | 2,855 | 2,611 (1,306) | 3,506 (1,753) |
+| Prompt + generated tokens/s, whole batch (per GPU) | 10,942 | 8,399 | 14,432 (7,216) | 10,048 (5,024) |
+| Statements agreeing with GPT-6 Sol, main task (800) | 89.5% [88, 91] | 91.0% [90, 92] | 90.2% [89, 91] | 92.3% [91, 93] |
+| Full images agreeing with Sol (pass or fail) | 82.9% | 83.4% | 84.8% | 86.5% |
+| Leniency: full-image pass rate minus Sol's | +6.9 points | +11.1 | +2.0 | +4.8 |
+| Prompts that need reasoning (200): statements vs Sol | 82.1% [80, 85] | 86.1% [84, 88] | 86.2% [84, 89] | 89.0% [87, 91] |
+| Statements agreeing with Gemini 3.1 Pro (350 main-task) | 89.7% | 91.7% | 90.9% | 93.2% |
+| Statements agreeing with the Claude Opus 5.5 audit (~130) | 86.9% | 86.1% | 86.2% | 87.7% |
 
-**Prompts that need reasoning.** Across all 1,047 reasoning images with labels (R2I-Bench and T2I-CoReBench's
-reasoning dimensions; 847 of them development images for the fast mode), the quality mode agrees with Sol on 81.7%
-of statements against 72.3% (+9.3 [+8.0, +10.7]), with Gemini on 79.9% against 68.3% (582 images), and with the
-audit on 78.8% against 73.6% (153). Across all of them it is also the less lenient mode (+6.5 points against
-+8.4), though not on the 200 held-out ones (+6.0 against +4.5), and it takes 1.5x the fast mode's time (530 s
-against 361 s for 847 images, both at 128 in flight). The lead comes almost entirely from R2I-Bench; details and
-caveats in [docs/results.md](docs/results.md#prompts-that-need-reasoning-every-labelled-image).
+For scale: the two frontier judges agree with each other on 93.4% of statements on the 350 images Gemini labelled, and
+the same judge on Qwen3-VL-32B (`qwen3vl-v1`, below) reached 87.4% (fast) and 89.8% (quality) against Sol on the same
+800 images, at $0.36 and $0.41 per thousand. Sol costs $5.51 and Gemini $5.84 per thousand images at batch list
+prices. Tokens per second count thinking tokens as generated and image tokens as prompt; they compare servers, not
+judges, since the modes need 299-872 generated tokens per image (Qwen3-VL-32B's fast mode needed 1,294 for its three
+requests per image at 2,999 tokens/s). Per-request decode speed, time to first token, and how each figure is counted:
+[docs/serving.md](docs/serving.md#tokens-per-second-and-latency-per-request).
 
-**The thinking budget.** The quality mode stops the model's reasoning at 8,192 tokens and has it answer from what it
-has. Main-task prompts never get near that (the longest reasoning we saw was 5,287 tokens); on prompts that need
-reasoning, about 0.6% of chains loop. Without the budget those chains run to the 16,384-token limit, fail, and are
-retried, and the batch waits for them: on 847 reasoning images the budget cut 0.7% of chains and took the batch from
-641 s to 530 s with statement agreement unchanged. If you judge mostly reasoning prompts and can spend the time,
-`--thinking-budget 16384` (or `-1` for none) lets the model think longer; on our reasoning images that changed
-statement agreement by nothing and full-image agreement by +0.4 points (not significant), for about 20% more batch
-time. [docs/serving.md](docs/serving.md#reasoning-prompts-and-the-thinking-budget) has the measurements.
+Which to use:
+
+- **`fast`** is the cheapest and fits one GPU; it agrees with Sol as well as Qwen3-VL-32B-Thinking does.
+- **`quality`** is the best one-GPU judge, most of all on prompts that need reasoning (a scene after an event, a
+  quantity to compute, a rule to apply), and the most lenient of the four.
+- **`flash-fast`** is the least lenient: it passes almost exactly as many images in full as Sol does.
+- **`flash-quality`** is the closest to the frontier judges on every reference.
+
+The agreement rows are from the run of 2026-10-30, with that day's serving settings (Flash-Next at 64 requests at
+once, input order, no thinking budget). The serving changes made after it ([docs/serving.md](docs/serving.md)), each
+measured on 600 development images against the previous settings in the same job: Flash-Next in 92% of GPU memory with
+96 requests at once took its batches from 91 s to 80-81 s (`flash-fast`) and from 195 s to 150-154 s
+(`flash-quality`); starting the longest checklists first then took them to 75 s and 139 s against anchors of 79-81 s
+and 156-165 s before and after (the 27B: 104 s against 106-110 s, 171 s against 178-182 s); 112 requests at once took
+`flash-fast` from 78 s to 73-75 s. Each moved verdicts about as much as rerunning the same settings does, and so did
+all of them together: the timing run's verdicts differ from the 2026-10-30 run's on 3.2-5.6% of statements, as reruns
+and the kept changes do on development images (Limitations, below). On the held-out images the changes took Flash-Next
+from 154 s to 121 s and 288 s to 249 s, and the 27B from 179 s to 177 s and 301 s to 295 s. The quality modes also cap
+reasoning at 8,192 tokens (below).
 
 ## Quickstart
 
-Requirements: an 80 GB H100 (both checkpoints are FP8), CUDA 12, Python 3.10+.
+What it was measured on: H100 80 GB (SXM) GPUs, vLLM 0.32.0, Python 3.11. The 27B modes need one GPU. The Flash-Next
+modes need two, and host memory for the model's 51-billion-parameter n-gram table, which vLLM keeps off the GPU (we
+ran with 192 GB).
 
 ```bash
 pip install vllm==0.32.0
@@ -79,22 +86,34 @@ pip install -e .
 Try it on the four images in [examples/](examples):
 
 ```bash
-fastqwenjudge judge --data examples/items.jsonl --out results.jsonl                   # fast mode
-fastqwenjudge judge --mode quality --data examples/items.jsonl --out results.jsonl    # quality mode
+fastqwenjudge judge --mode fast --data examples/items.jsonl --out fast.jsonl                   # one GPU
+fastqwenjudge judge --mode quality --data examples/items.jsonl --out quality.jsonl             # one GPU
+fastqwenjudge judge --mode flash-fast --data examples/items.jsonl --out flash-fast.jsonl       # two GPUs
+fastqwenjudge judge --mode flash-quality --data examples/items.jsonl --out flash-quality.jsonl # two GPUs
 ```
 
-Each command starts a vLLM server with the mode's settings, judges the batch, writes `results.jsonl` and stops
-the server. The first run downloads the model (about 34 GB) and compiles kernels, which takes a few minutes; later
-starts take about two. On a machine without internet access, download the checkpoint elsewhere and pass its
-folder with `--model /path/to/Qwen3-VL-32B-Instruct-FP8` (or `-Thinking-FP8` for the quality mode).
+`examples/results_<mode>.jsonl` are the same command's output for each mode (made on 2026-10-30, before the last
+serving changes). A rerun can differ on a few statements: the quality modes sample, and the fast modes' probabilities
+can land on either side of their cut-off (Limitations). Write to a new file: an output file that already has an
+image's result skips it.
+
+Each command starts a vLLM server with the mode's settings, judges the batch, writes its output file and stops the
+server. The first run downloads the checkpoint (31 GB for the 27B, 133 GB for Flash-Next) and compiles kernels;
+later starts take about two minutes (four for Flash-Next). On a machine without internet access, download the
+checkpoint elsewhere and pass its folder with `--model /path/to/Qwen3.8-27B-FP8`.
 
 ```bash
-fastqwenjudge judge --gpus 0,1,2,3 --data items.jsonl --out results.jsonl     # one server per GPU
-fastqwenjudge serve --mode fast --port 8000                                   # keep a server up between runs ...
-fastqwenjudge judge --base-url http://127.0.0.1:8000/v1 --data items.jsonl --out results.jsonl   # ... and use it
-fastqwenjudge judge --mode quality --thinking-budget -1 --data items.jsonl --out results.jsonl  # no budget
+fastqwenjudge judge --gpus 0,1,2,3 --data items.jsonl --out results.jsonl     # one server per GPU (per pair for flash)
+fastqwenjudge serve --mode quality --port 8000                                # keep a server up between runs ...
+fastqwenjudge judge --mode quality --base-url http://127.0.0.1:8000/v1 --data items.jsonl --out results.jsonl
+fastqwenjudge checklist --data prompts.jsonl --out items.jsonl                # requirements from prompts
 fastqwenjudge compare --reference reference.jsonl results.jsonl              # agreement with another judge
 ```
+
+`fast` and `quality` share a server (thinking is switched per request), so one `serve --mode quality` serves both.
+`flash-fast` and `flash-quality` share a model but not their server settings: `flash-fast` runs 112 requests at once
+and `flash-quality` 96, so start the server with the mode you will judge with. `compare` reads any file in the
+output format below as the reference; its items must hold the same requirements in the same order.
 
 From Python:
 
@@ -106,9 +125,10 @@ for image_id, r in results.items():
     print(image_id, r["all_satisfied"], [it["satisfied"] for it in r["items"]])
 ```
 
-`judge()` takes the command's main options (`base_url=`, `gpus=`, `model=`, `thinking_budget=`). Results are
-appended to the output file as they finish, so an interrupted run picks up where it stopped; write to a new file
-when you change the mode or the budget.
+`judge()` takes the command's main options (`base_url=`, `gpus=` as a list such as `["0", "1"]`, `model=`,
+`objective=`). Results are appended to
+the output file as they finish, so an interrupted run picks up where it stopped; write to a new file when you change
+the mode.
 
 ## Input and output
 
@@ -130,146 +150,134 @@ when you change the mode or the budget.
 | `requirements` | required | statements, not questions ("The sofa is red.", not "Is the sofa red?") |
 | `group`, `variant` | optional | free-form labels kept with the item (benchmark, model, seed); `--groups` filters on `group` |
 
-Images that share a checklist (the same prompt rendered by different models or seeds) share one compile request
-in the fast mode, so judging many renders of one prompt is cheap.
+No checklists yet? `fastqwenjudge checklist` writes them from prompts ([docs/checklists.md](docs/checklists.md)).
 
-**Output** is a JSONL file, one line per image (the quality mode's verdict on the first example; the fast mode
-counted five motorcycles where this run counted seven, which is why both outputs are in [examples/](examples)):
+**Output** is a JSONL file, one line per image (the `fast` mode on the first example, evidence shortened):
 
 ```json
-{"key": "15f6ac4690ae12c7", "id": "motorcycles_and_dogs", "judge": "think",
+{"key": "8abc8ade85da7182", "id": "motorcycles_and_dogs", "judge": "fast",
  "result": {"items": [
-    {"id": 1, "requirement": "There are exactly seven motorcycles in the image.", "evidence": "The image contains seven distinct motorcycles.", "satisfied": true},
-    {"id": 2, "requirement": "The image contains one or more motorcycles.", "evidence": "The image contains seven motorcycles, which is one or more.", "satisfied": true},
-    {"id": 3, "requirement": "There are exactly three dogs in the image.", "evidence": "The image contains only one dog, not three.", "satisfied": false},
-    {"id": 4, "requirement": "The image contains one or more dogs.", "evidence": "The image contains one dog, which is one or more.", "satisfied": true}],
-  "score": 0.75, "all_satisfied": false, "requests": 1}}
+    {"id": 1, "requirement": "There are exactly seven motorcycles in the image.", "evidence": "I can clearly identify four motorcycles in the foreground and mid-ground (...)", "satisfied": false, "p_true": 1.0e-05, "written": false},
+    {"id": 2, "requirement": "The image contains one or more motorcycles.", "evidence": "There are multiple motorcycles visible in the image (...)", "satisfied": true, "p_true": 0.999998, "written": true},
+    ...],
+  "score": 0.5, "all_satisfied": false, "requests": 1}}
 ```
 
 Each line has the image `id`, the `judge` that produced it, a `key` the runner uses to resume, and the `result`.
 `items` has one entry per requirement, in input order: the `requirement`, the model's `evidence`, and `satisfied`.
-`score` is the fraction satisfied and `all_satisfied` whether all are. The fast mode also keeps `plans` (the
-neutral question asked for each requirement and the expected value set aside), `observations` (what the model
-reported seeing) and `text_verdict_before_guards`, so any verdict can be traced back to what the model saw; the
-quality mode keeps `requests` (attempts needed). An image that failed after three attempts has an `error` field
-instead of `result` and is retried on the next run. [examples/](examples) has both modes' full output for the
-four example images.
+The fast modes add `p_true`, the probability the model gave the verdict `true`, and `written`, the verdict it wrote:
+`satisfied` is `p_true` >= the mode's cut-off, so the two differ where the model was not quite sure. `score` is the
+fraction satisfied and `all_satisfied` whether all are. An image that failed after three attempts has an `error`
+field instead of `result` and is retried on the next run. [examples/](examples) has all four modes' output for the
+four images.
 
-`compare` reads any file in this format as the reference (an API judge's labels, a human audit), matched by `id`.
+## How it judges
 
-## How it works
+One request per image: the prompt, the numbered checklist and the image, answered as JSON with one verdict and one
+line of evidence per requirement (the server's structured output enforces the shape and the count). Three things
+make that single call a good judge on these models ([docs/design.md](docs/design.md)):
 
-![What each request of the two judges sees](docs/figures/judges.svg)
+- **A strict prompt.** The errors left are near misses: a dog that is not quite the named breed, a pose that
+  suggests running, a two-part requirement with one part true. The strict prompt spells out that every part of a
+  requirement counts, that identities must be visible, and that actions must be shown, not inferred.
+- **The model's own confidence, with thinking off.** The verdict is one token, and the server returns its
+  probability. Counting a statement as satisfied only when P(true) >= 0.999 took the 27B's leniency on development
+  images from +16 to +6 points for 0.8 points of agreement with Sol: the model is sure of almost everything (fewer
+  than 2% of its verdicts fall between 0.02 and 0.98), so the useful cut-offs are in the fourth decimal.
+- **Reasoning, with thinking on,** at medium effort, capped at 8,192 tokens of reasoning. Normal chains stay well
+  under it (it cut one of 27,742 development chains); it is there for the rare chain that loops, which can run toward
+  the 32,768-token limit and hold a whole batch open ([docs/serving.md](docs/serving.md#the-batchs-tail)).
 
-**Fast mode: neutral grounding.** A judge that reads "three red apples" and then looks at the image tends to see
-three red apples. The neutral judge splits the decision so that the request that looks at the image never sees
-the desired answer. A text-only *compile* step turns each requirement into a neutral question and keeps the
-expected value aside ("There are exactly three cups" becomes "Describe the cups on the table", expected count 3).
-An *observe* step answers those questions from the image alone. A text-only *decide* step compares requirements
-with observations, and a few lines of code veto a pass that a definite observation contradicts (a stated count,
-an absence, "every X"). Details in [docs/design.md](docs/design.md).
+A neutral pipeline (three requests, the one that sees the image never sees the requirements), which this judge used on
+Qwen3-VL-32B, does not pay on these models: it was 2.6-3.1x slower than one request, agreed less often with Sol and
+Gemini (the audit preferred it to the single call with thinking off, by 2.4 points on the 27B and 0.6 on Flash-Next,
+but not to the thinking ones), and overcorrected, failing more images than Sol does. A no-checklist baseline, a 0-10
+score for how well the image follows its prompt, loses 4 to 14 points of full-image agreement with Sol against the
+checklist judges ([docs/results.md](docs/results.md)).
 
-**Quality mode: a thinking model in one call.** The Thinking variant reasons before it answers. On the same images
-it is about 2 points closer to Sol and Gemini on the main task (a point further from the blind audit) and 7 points
-closer to Sol on prompts that need reasoning, at 1.2x the fast mode's time per batch. It is also more lenient, which
-matters if its verdicts become a reward.
+## How fast, and why
 
-**Serving.** Both modes run on vLLM with Qwen's FP8 checkpoints, an FP8 KV cache, FlashInfer attention, and n-gram
-speculative decoding switched on only when the batch is small enough for it to pay. The fast mode adds fused
-RMSNorm/SiLU + FP8 quantization kernels for Qwen3-VL's decoder layers, loaded as a vLLM plugin; the quality mode
-adds the thinking budget. Every change was measured on its own, and agreement was re-checked after each change
-that can move verdicts:
+![Where the 27B quality judge's time goes, and the same work at the H100's roofline](docs/figures/where_time_goes.png)
 
-![One judge request through the stack, with each change and its measured gain](docs/figures/stack.svg)
+The 27B judges 1,000 images with medium reasoning in 295 s on one H100. A floor from an analytic model of the work
+(every FLOP at the FP8 tensor-core peak, or every byte at peak HBM bandwidth, whichever binds, every step full) is 80
+s, so the run is at 3.7x its speed of light. The GPU is busy 97% of the time, which says little on its own: busy is
+not fast. A profile of every kernel of a whole batch, set against what each kernel reaches alone at this model's
+shapes, splits the gap. Of a 600-image development batch's gap (3.7x its own speed of light), more than half (53-57%;
+the vision tower's kernels were not measured alone) is out of reach for today's kernels at these shapes: a decoding
+step of 64 requests x 4 tokens sits at the H100's ridge point, where FP8 matmuls reach about half of peak;
+FlashAttention 3 reaches about 40% of the bandwidth for this model's 4 KV heads of 256; and speculative decoding needs
+a copy of each DeltaNet state per draft. About a sixth is kernels below their own ceiling, and a quarter is small
+kernels outside the model's work and the time between them ([docs/roofline.md](docs/roofline.md)).
 
-![Fast mode serving ladder](docs/figures/fast_ladder.png)
+What made it fast, each step measured on the same development images: a 16-bit DeltaNet state instead of the
+checkpoint's 32-bit one together with a cap of 64 requests at once, which halved the quality judge's batch (369 s to
+184 s for 600 images); no prefix caching (every request has its own image); the checkpoint's own draft head (three
+draft tokens per step, worth about 40% to the 27B's thinking judge); the output layer in FP8 (a small vLLM plugin,
+4%); starting the longest checklists first (4-13%); and, for the 27B's quality judge, a top-k / top-p mask whose cost
+does not depend on the logits (a second plugin: 7% more images per second in steady state, within noise on batch
+time). For Flash-Next: tensor parallelism across both GPUs with the experts split between them, 92% of GPU memory, and
+96-112 requests at once.
 
-![Quality mode serving ladder](docs/figures/quality_ladder.png)
+![Images per second and time per image against the server's cap on requests running at once](docs/figures/requests_in_flight.png)
 
-The quality mode's biggest win was not a kernel. Qwen's FP8 checkpoint (128x128 weight blocks, the vision tower kept
-in BF16) writes 20% fewer tokens than the BF16 weights quantized at load, and shortens the tail of long reasoning
-chains that decides when a batch finishes. [docs/serving.md](docs/serving.md) covers profiling, both ladders,
-scale-out, RL-sized batches, reasoning length, and what speculative decoding can and cannot do for reasoning chains.
+How many requests to run at once was measured at a fixed load, not picked: past 64 the 27B gains at most 2% while each
+image takes about 1.4x as long; Flash-Next gains 19-24% from 64 to 112, with the time per image growing up to 96 and
+barely from 96 to 112. Tried and not kept, with numbers in [docs/serving.md](docs/serving.md): a Triton kernel that
+writes the DeltaNet state once a step instead of once per draft token (correct, but 3-6% slower), more draft tokens as
+a batch empties, two Flash-Next replicas instead of one across both GPUs, Flash-Next's dense layers in FP8, a top-k /
+top-p mask built from the 64 largest logits, and vLLM's fusions of the norms and activations into the FP8
+quantization.
 
 ## How we know it agrees with the frontier judges
 
-Three references, none of them used to train anything: GPT-6 Sol (reasoning effort xhigh) on every evaluation
-image, Gemini 3.1 Pro on a subset, and a blind audit in which Claude Opus 5.5 graded random images by looking at
-them, before any judge output on them existed. The judge was changed in rounds. Each round's rules were written
-down before its held-out data existed, decisions were made on development sets only, and each held-out set was
-used once. The round-2 neutral judge beat the first version by 2.8 statement points against Sol on round 2's
-held-out set and by 4.1 on round 3's (+5.3 against the audit). Five further changes tried in round 3 left
-main-task agreement with Sol within half a point on development and held-out data and were not adopted; the one
-pre-registered for reasoning prompts did not hold on the held-out set. The quality mode was a pre-registered
-hypothesis that held on round 3's held-out set. As it ships, it keeps the gain against Sol, but against the audit
-it is a point below the fast mode on the main task (within noise). [docs/results.md](docs/results.md) has the
-per-set tables and what did not work.
-
-## Using it for RL rewards
-
-An RL step waits for the last reward of its batch, so a batch of 16-64 images is mostly tail, where drafting
-tokens pays off more than in a 1,000-image batch: n-gram drafts take the quality mode's 64-image step from 75 s to
-60 s. For the fast mode they help on in-family prompts and hurt on new prompt styles from 32 images up
-([docs/serving.md](docs/serving.md#rl-sized-batches)).
-
-| Time until the last verdict, one H100 | 16 images | 64 images |
-|---|---|---|
-| fast mode (n-gram drafts; mean of 3 runs on two image sets) | 23-24 s | 44-59 s |
-| quality mode, `quality_rl` profile (median of 4-6 batches; worst in brackets) | 24 s (33 s) | 54 s (80 s) |
-| quality mode without drafts or budget | 42 s (46 s) | 75 s (96 s) |
-
-`--server quality_rl` is the quality profile with n-gram drafts at every batch size. The thinking budget bounds
-the worst step: without it, one looping chain held a 64-image step for 145 s.
+Three references, none of them used to tune anything on the held-out set: GPT-6 Sol (reasoning effort xhigh) on every
+image, Gemini 3.1 Pro on a subset, and a blind audit in which Claude Opus 5.5 graded random images by looking at them
+before any judge output on them existed. The held-out set was scored twice, each time with the judges and settings
+written down beforehand: once for the baselines (which is where the single call replaced the neutral pipeline) and
+once for the four modes; a third run, also planned in advance, measured only their speed. Prompts, cut-offs, sampling
+and reasoning effort were chosen on development sets in between. The serving changes made after the final run (order,
+request caps, the sampling kernel, and the reasoning and answer caps, which bind only on rare runaway requests) were
+checked on development images to move verdicts no more than a rerun does. [docs/results.md](docs/results.md) has the
+per-set tables, the baselines, and what did not work.
 
 ## Limitations
 
-- Both modes see one image per request. Editing tasks with a source and a result image are not supported yet.
+- One image per request: editing tasks with a source and a result image are not supported.
 - Agreement is measured on text-to-image outputs with checklists of statements; other image types are untested.
-- The thinking model samples (temperature 0.6, fixed seed per request), so rerunning the quality mode can change
-  a small share of verdicts; the fast mode is greedy, but batching still flips about 1% of its statement verdicts.
-- The reasoning-prompt numbers in the table come from 200 held-out images, 30 of them audited; on those 30 the
-  audit sides with the fast mode (4.0 statement points; the quality mode passes six of them in full that the audit
-  fails). The larger 1,047-image comparison, where the audit sides with the quality mode, includes the fast mode's
-  development images.
-- The quality mode is lenient: it passes 13.5 points more images in full than Sol does.
-- The fast mode left 2 of the 1,000 held-out images without a verdict (an `error` field instead of a result): one
-  whose plan kept failing the check that a neutral question does not name the expected count, and one 32-statement
-  checklist whose observations ran past their output limit (128 tokens per statement) on every attempt. With the
-  earlier fixed limit of 2,048 tokens, 6 more checklists of 24-50 statements got no verdict; judging them in full
-  made the batch 11% slower ([docs/serving.md](docs/serving.md#long-checklists)). The quality mode judged every image.
-- vLLM's compile cache is off in the fast profile, because it does not know about the patched decoder layers;
-  start-up takes about a minute longer.
-
-## Follow-ups
-
-- The quality mode on 2 and 4 GPUs. The fast mode reaches 13.1 images/s on 4 with independent replicas and
-  prefix-aware routing; the quality mode should scale the same way, but it has not been measured.
-- A trained drafter (EAGLE-3, DFlash or DSpark) for the Thinking model, and GPU suffix decoding once vLLM ships it.
-- Two-image (editing) inputs.
+- The quality modes sample (temperature 1.0, a fixed seed per request), and batching changes the arithmetic, so a
+  rerun changes about 4-6% of their statement verdicts. The fast modes are greedy, and the verdict the model writes
+  changes for about 2% of statements, but many of their probabilities sit near the cut-off, so 2.7-5.0% of their
+  final verdicts change (Flash-Next 2.7-3.3%, the 27B 4.0-5.0%).
+- `quality` is lenient: it passes 11.1 points more images in full than Sol does. `flash-fast` and `flash-quality`
+  are the ones to use when false passes cost more than false fails.
+- The Flash-Next modes need two 80 GB GPUs and host memory for the n-gram table.
+- The package is pinned to vLLM 0.32 (the Quickstart installs it), whose internals its two 27B plugins (the FP8
+  output layer and the three-pass top-k / top-p mask) patch, and every number here was measured on it. Trying another
+  version is at your own risk: install it yourself, copy `src/fastqwenjudge/profiles/27b.yaml`, remove its
+  `FQJ_FP8_LM_HEAD` and `FQJ_TOPK_TOPP` lines, pass the copy with `--server`, and check verdicts against a 0.32 run.
 
 ## Repository
 
 | Path | What it is |
 |---|---|
 | `src/fastqwenjudge/` | the package: `judge()` and the `fastqwenjudge` command (`modes.py`, `cli.py`) |
-| `src/fastqwenjudge/judges/` | `neutral.py` (fast mode, with the guards), `single.py` (quality mode and single-call baselines), `vqascore.py` (baseline) |
-| `src/fastqwenjudge/client.py`, `runner.py` | async client (requests in flight, retries, prefix-aware routing) and the resumable runner |
-| `src/fastqwenjudge/server.py`, `profiles/` | starts vLLM from a profile; `fast`, `quality`, `quality_rl` |
-| `src/fastqwenjudge/kernels/` | fused RMSNorm/SiLU + FP8 Triton kernels and the vLLM plugin that loads them (`FQJ_FUSED_KERNELS=1`) |
-| `src/fastqwenjudge/prompts/` | every system prompt, as plain text |
-| `examples/` | four images, their items file, and both modes' output |
-| `configs/servers/` | vLLM as it comes (`default.yaml`) and the tuned BF16 and FP8 profiles of the serving ladder's first steps |
-| `experiments/quality/` | `run.py` runs judges on one server; `analyze.py` builds the agreement tables |
-| `experiments/throughput/` | `sweep.py` (latency against load), `makespan.py` (time to the last verdict of a batch), `run.py`, `efficiency.py` (MFU, MBU), `startup.py`, `hf_server.py` (transformers baseline), `plot.py` |
-| `experiments/kernels/` | `profile_server.py` (GPU time by kernel under load), kernel benchmarks (`bench_*.py`), the block-FP8 GEMM that was not adopted |
-| `experiments/speculator/` | training data and hidden states for the EAGLE-3 draft head |
-| `experiments/audit/` | building a blind audit queue, recording verdicts, scoring judges against it |
-| `experiments/ladder.py` | the serving ladder table, [docs/ladder.md](docs/ladder.md) |
-| `docs/` | [design](docs/design.md), [results](docs/results.md), [serving](docs/serving.md), [audit protocol](docs/audit.md) |
+| `src/fastqwenjudge/judges/` | `single.py`, the one-request judge behind every mode, and the four modes' settings |
+| `src/fastqwenjudge/client.py`, `runner.py` | async client (requests in flight, retries, admission order) and the resumable runner |
+| `src/fastqwenjudge/server.py`, `profiles/` | starts vLLM from a profile: `27b`, `flash_next` |
+| `src/fastqwenjudge/kernels/` | two vLLM plugins for the 27B: the output layer in block FP8 (`FQJ_FP8_LM_HEAD=1`) and a top-k / top-p mask whose cost does not depend on the logits (`FQJ_TOPK_TOPP=1`) |
+| `src/fastqwenjudge/checklists.py`, `prompts/` | checklist generation; every system prompt, as plain text |
+| `examples/` | four images, their items file, and the four modes' output |
+| `experiments/qwen38/` | `run.py` (judges on one server), `ladder.py` (serving settings one after another), `profile_gpu.py` (GPU time by kernel), `nsys_summary.py` (a whole batch's kernels), `ceilings.py` (what each kernel class reaches at the model's shapes), `roofline.py` (MFU, MBU, speed of light); every ladder's settings in `ladders/` |
+| `experiments/audit/` | building a blind audit queue and recording its verdicts |
+| `docs/` | [design](docs/design.md), [results](docs/results.md), [serving](docs/serving.md), [roofline](docs/roofline.md), [checklists](docs/checklists.md), [audit protocol](docs/audit.md) |
 
-The experiment scripts read item files from `data/` and write per-image outputs into `results/` folders. Neither
-is in the repository (the evaluation images and reference labels add up to about 30 GB); the aggregate tables
-they produced, and figures drawn from them, are in `docs/`.
+The experiment scripts read item files from a data folder and write per-image outputs into `results/` folders.
+Neither is in the repository (the evaluation images and reference labels add up to about 30 GB); the aggregate
+tables they produced, and the figures drawn from them, are in `docs/`.
+
+An earlier version of this judge ran on Qwen3-VL-32B; its code and documentation are at the tag
+[`qwen3vl-v1`](https://github.com/m3abdulr/fastqwenjudge/tree/qwen3vl-v1).
 
 ## License
 

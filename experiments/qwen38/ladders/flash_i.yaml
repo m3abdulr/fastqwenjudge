@@ -1,0 +1,47 @@
+# Flash-Next NVFP4 serving ladder, part I (two H100s): the batch's tail, as 27B part L: every request's start, time
+# and tokens recorded; 5 and 7 drafts as the batch empties (vLLM switches them off under data parallel, so tensor
+# parallel at 92% / 96 throughout); the longest checklists first; 5 batches of 120; the 847 reasoning development
+# images in the quality mode.
+profile: flash_next
+data: q38_dev600.jsonl
+judges: [off_greedy, think_medium_strict]
+rungs:
+  - name: kept
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: tail5
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96,
+          speculative-config: {"method": "mtp", "num_speculative_tokens": 5,
+                               "num_speculative_tokens_per_batch_size": [[1, 24, 5], [25, 96, 3]]}}
+  - name: tail7
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96,
+          speculative-config: {"method": "mtp", "num_speculative_tokens": 7,
+                               "num_speculative_tokens_per_batch_size": [[1, 12, 7], [13, 24, 5], [25, 96, 3]]}}
+  - name: makespan
+    objective: makespan
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: kept_c5
+    chunks: 5
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: tail5_c5
+    chunks: 5
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96,
+          speculative-config: {"method": "mtp", "num_speculative_tokens": 5,
+                               "num_speculative_tokens_per_batch_size": [[1, 24, 5], [25, 96, 3]]}}
+  - name: reasoning_kept
+    data: r3_dev_reasoning.jsonl
+    judges: [think_medium_strict]
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: reasoning_tail5
+    data: r3_dev_reasoning.jsonl
+    judges: [think_medium_strict]
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96,
+          speculative-config: {"method": "mtp", "num_speculative_tokens": 5,
+                               "num_speculative_tokens_per_batch_size": [[1, 24, 5], [25, 96, 3]]}}
+  - name: reasoning_tail7
+    data: r3_dev_reasoning.jsonl
+    judges: [think_medium_strict]
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96,
+          speculative-config: {"method": "mtp", "num_speculative_tokens": 7,
+                               "num_speculative_tokens_per_batch_size": [[1, 12, 7], [13, 24, 5], [25, 96, 3]]}}
+  - name: kept_again
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}

@@ -1,0 +1,21 @@
+# Not in the package: kernels/gdn_replay.py was dropped (docs/serving.md, "What was tried and not kept").
+# 27B serving ladder, part J (one H100): one DeltaNet state per request while drafting (kernels/gdn_replay.py,
+# FQJ_GDN_REPLAY=1): vLLM keeps four BF16 states per request with three drafts and writes all four every step; the
+# replay keeps one plus a ring of the last window's inputs, and frees three states (~226 MB) per request. It replaces
+# vLLM's Triton path, so vLLM's Triton path alone is measured too (the kept settings use its fused CUDA kernel).
+profile: 27b
+data: q38_dev600.jsonl
+judges: [off_greedy_strict, think_medium_strict]
+rungs:
+  - name: kept
+  - name: triton
+    env: {VLLM_GDN_DECODE_KERNEL: triton}
+  - name: replay
+    env: {VLLM_GDN_DECODE_KERNEL: triton, FQJ_GDN_REPLAY: 1}
+  - name: replay_s96
+    env: {VLLM_GDN_DECODE_KERNEL: triton, FQJ_GDN_REPLAY: 1}
+    set: {max-num-seqs: 96}
+  - name: replay_s128
+    env: {VLLM_GDN_DECODE_KERNEL: triton, FQJ_GDN_REPLAY: 1}
+    set: {max-num-seqs: 128}
+  - name: kept_again

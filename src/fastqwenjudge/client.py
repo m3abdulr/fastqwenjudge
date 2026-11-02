@@ -1,11 +1,11 @@
 """Async client for any OpenAI-compatible chat endpoint (vLLM, SGLang, hosted APIs).
 
-All judge requests go through `Client.chat_json`: greedy decoding, output constrained to a JSON schema, and a
-retry loop that tells the model what went wrong instead of resending the same request. A global limit bounds the
-number of requests in flight; the server does its own batching on top of that. Requests waiting for a slot are
-admitted in arrival order, or by the rank of the image they belong to (see `Slots` and `request_rank`). Given
-several servers of the same model, each request goes to the one most likely to have its prompt's beginning cached
-(see `PrefixRouter`), or to the one with the fewest requests in flight.
+All judge requests go through `Client.chat_json`: output constrained to a JSON schema (greedy unless the judge sets
+its own sampling), and a retry loop that tells the model what went wrong instead of resending the same request. A
+global limit bounds the number of requests in flight; the server does its own batching on top of that. Requests
+waiting for a slot are admitted in arrival order, or by the rank of the image they belong to (see `Slots` and
+`request_rank`). Given several servers of the same model, each request goes to the one most likely to have its
+prompt's beginning cached (see `PrefixRouter`), or to the one with the fewest requests in flight.
 """
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ class Reply:
     completion_tokens: int
     latency: float
     retries: list[dict] = field(default_factory=list)
+    logprobs: list[dict] | None = None   # the answer's tokens with their top alternatives, when asked for
 
 
 @dataclass
@@ -48,7 +49,7 @@ class RequestLog:
 
 
 # Rank of the image a request belongs to, lower is more urgent. The runner sets it in each image's task; every
-# request made from that task inherits it, including a compile that later images of the same checklist share.
+# request made from that task inherits it.
 request_rank: contextvars.ContextVar[int] = contextvars.ContextVar("request_rank", default=0)
 
 
@@ -136,12 +137,14 @@ class PrefixRouter:
 
 class Client:
     def __init__(self, base_url: str | list[str], model: str, *, concurrency: int = 128, api_key: str = "EMPTY",
-                 timeout: float = 600, retries: int = 3, seed: int = 0, temperature: float = 0.0,
-                 admission: str = "fifo", server_priority: bool = False, routing: str = "prefix"):
+                 timeout: float = 600, retries: int = 3, seed: int | None = 0, temperature: float = 0.0,
+                 admission: str = "fifo", server_priority: bool = False, routing: str = "least_outstanding"):
         """`admission="rank"` gives a free slot to the waiting request with the lowest `request_rank`, so images
         already in progress finish before new ones start; "fifo" ignores ranks. `server_priority` also sends the
         rank as vLLM's request priority (the server must run with --scheduling-policy priority). With several
-        servers, `routing` is "prefix" (`PrefixRouter`) or "least_outstanding" (fewest requests in flight)."""
+        servers, `routing` is "least_outstanding" (fewest requests in flight) or "prefix" (`PrefixRouter`, for servers
+        that keep a prefix cache; the bundled profiles turn it off, and every request shares the system prompt, so
+        prefix routing would only pile requests onto one server up to its load bound)."""
         if admission not in ("fifo", "rank"):
             raise ValueError(f"admission must be 'fifo' or 'rank', not {admission!r}")
         if routing not in ("prefix", "least_outstanding"):
@@ -201,20 +204,26 @@ class Client:
     async def chat_json(self, stage: str, system: str, content: list[dict], schema: dict, *, max_tokens: int,
                         validate: Callable[[dict], Any] = lambda a: a, field_name: str | None = None,
                         count: int | None = None, temperature: float | None = None,
-                        extra_body: dict | None = None) -> Reply:
+                        extra_body: dict | None = None, top_logprobs: int | None = None) -> Reply:
         """One schema-constrained request. If `field_name`/`count` are given, the schema also pins the length of
         that array, so the model returns exactly one entry per requirement. `temperature` overrides the client's
         (a judge that samples, such as a thinking model, sets its own); `extra_body` adds server-specific request
-        fields (vLLM's thinking_token_budget)."""
+        fields (sampling settings, chat-template switches). With `top_logprobs`, the reply carries each answer
+        token's log-probability and that many alternatives (vLLM: the model's raw probabilities, before the JSON
+        grammar and the sampling settings)."""
         schema = copy.deepcopy(schema)
         if field_name and count:
             schema["properties"][field_name].update(minItems=count, maxItems=count)
         messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
         payload = {"messages": messages, "temperature": self.temperature if temperature is None else temperature,
-                   "seed": self.seed, "max_tokens": max_tokens, "response_format": {
+                   "max_tokens": max_tokens, "response_format": {
                        "type": "json_schema", "json_schema": {"name": stage, "strict": True, "schema": schema}}}
+        if self.seed is not None:   # vLLM samples requests that carry their own seed one at a time
+            payload["seed"] = self.seed
         if extra_body:
             payload["extra_body"] = extra_body
+        if top_logprobs:
+            payload.update(logprobs=True, top_logprobs=top_logprobs)
         retries, started, tokens = [], time.monotonic(), [0, 0]
         for attempt in range(1, self.retries + 1):
             finish = None
@@ -228,7 +237,8 @@ class Client:
                 if finish != "stop":
                     raise ValueError(f"Incomplete response: {finish}")
                 answer = validate(json.loads(choice["message"]["content"]))
-                return Reply(answer, attempt, tokens[0], tokens[1], time.monotonic() - started, retries)
+                return Reply(answer, attempt, tokens[0], tokens[1], time.monotonic() - started, retries,
+                             (choice.get("logprobs") or {}).get("content"))
             except Exception as error:
                 last = error
                 note = {"attempt": attempt, "error": str(error)[:1000], "finish_reason": finish}
@@ -240,15 +250,6 @@ class Client:
                     await asyncio.sleep(min(2 ** attempt, 20))
                 retries.append(note)
         raise RuntimeError(f"{stage}: {type(last).__name__}: {str(last)[:800]}")
-
-    async def top_logprobs(self, stage: str, content: list[dict], max_tokens: int = 1) -> tuple[str, list]:
-        """Greedy completion with the top-20 log-probabilities of the first token (for VQAScore-style scores)."""
-        raw = await self._create(stage, messages=[{"role": "user", "content": content}], temperature=0.0,
-                                 seed=self.seed, max_tokens=max_tokens, logprobs=True, top_logprobs=20)
-        choice = raw["choices"][0]
-        tokens = (choice.get("logprobs") or {}).get("content") or []
-        top = [(t["token"], t["logprob"]) for t in tokens[0].get("top_logprobs", [])] if tokens else []
-        return choice["message"].get("content") or "", top
 
 
 def feedback(error: Exception, finish: str | None, field_name: str | None, count: int | None) -> str | None:

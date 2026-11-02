@@ -1,0 +1,11 @@
+# Confirmation run, 27B (one H100): every candidate judge once on q38_dev2_confirm.jsonl (1,557 development images not
+# used so far, all with Sol labels; regular prompts only), on the server settings kept after parts A-E (FP8
+# checkpoint, built-in MTP 3, BF16 DeltaNet state, at most 64 sequences, no prefix caching). The thinking-off judges
+# record p_true for the cut-off.
+profile: experiments/qwen38/profiles/27b_start.yaml
+data: q38_dev2_confirm.jsonl
+judges: [off_greedy, off_greedy_strict, think_medium_strict, think_xhigh_strict, think_xhigh_doubt]
+rungs:
+  - name: final
+    set: {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16,
+          max-num-seqs: 64}

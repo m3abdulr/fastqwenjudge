@@ -1,0 +1,20 @@
+# 27B serving ladder, part N (one H100): runaway reasoning chains. In 19,023 quality-mode chains of the ladder runs
+# none ran away (the longest 8,382 tokens), but both CLI runs of the shipped quality judge had one: ~30,000 tokens
+# alone on the GPU for ~160 s, then, with the 8,192-token thinking budget on, ~33,000 tokens for ~150 s. The ladder's quality judges ask
+# for log-probabilities (p_true); the shipped one does not. Same server, same images, longest checklists first:
+# with log-probabilities, without (as shipped), and without plus the budget; per-request tokens in the request logs.
+profile: 27b
+judges: [think_medium_strict_nolp, think_medium_strict, think_medium_strict_budget]
+rungs:
+  - name: dev600
+    objective: makespan
+    data: q38_dev600.jsonl
+  - name: reasoning
+    objective: makespan
+    data: r3_dev_reasoning.jsonl
+  - name: dev600_again
+    objective: makespan
+    data: q38_dev600.jsonl
+  - name: reasoning_again
+    objective: makespan
+    data: r3_dev_reasoning.jsonl

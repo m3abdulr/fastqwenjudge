@@ -1,0 +1,54 @@
+# VOID (2026-10-31): started after the answer schema's evidence maxLength, which made xgrammar ~10x slower and left the
+# GPU waiting (not node contention, as this header may say); see 27b_q3.yaml / flash_l3.yaml.
+# 27B serving ladder, part Q2 (one H100): part Q again on another node. Part Q was cancelled after its
+# first three rungs: another job started on its node two minutes after it, and its GPU ran 65-72% busy (fast) and
+# 89-90% (quality) instead of 100%, at 4.0 / 2.7 images/s against part P's 5.9 / 3.1: host-bound, so no measure of
+# GPU work. Every rung here also sets the three-pass top-k / top-p mask (FQJ_TOPK_TOPP=1, part O, now in the
+# profile), so the fusion is measured on top of the package's settings. From part Q: part P's fused server traced the
+# same graph as the kept one: the 27B's FP8 matmuls go through torch.ops.vllm.dynamic_flashinfer_deepgemm_blockscale_gemm,
+# one opaque op that quantizes its input inside (DeepGEMM at 32+ rows, FlashInfer's swapAB kernel below), so the
+# passes found no rms_norm -> per_token_group_fp8_quant pair to fuse (part P: +0.3% / +1%, noise; cancelled after its
+# first pairs). VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER=0 selects vLLM's DeepGEMM kernel, which quantizes with the
+# QuantFP8 op in the graph, where rms_quant_fusion.py and act_quant_fusion.py have patterns for group 128 (column-major
+# and TMA-aligned scales included). "nofi" alone separates the kernel switch from the fusion. Steady state at 192 in
+# flight, then batches of the 600 for time and verdict flips; kept and nofi_fused twice, alternating.
+profile: 27b
+data: q38_dev600.jsonl
+judges: [off_greedy_strict, think_medium_strict]
+rungs:
+  - name: steady_kept
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 90, seconds: 180}
+    env: {FQJ_TOPK_TOPP: 1}
+  - name: steady_nofi
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 90, seconds: 180}
+    env: {VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: 0, FQJ_TOPK_TOPP: 1}
+  - name: steady_nofi_fused
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 90, seconds: 180}
+    env: {VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: 0, FQJ_TOPK_TOPP: 1}
+    set: {compilation-config: {"custom_ops": ["+rms_norm", "+silu_and_mul"], "pass_config": {"fuse_norm_quant": true, "fuse_act_quant": true}}}
+  - name: steady_kept_again
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 90, seconds: 180}
+    env: {FQJ_TOPK_TOPP: 1}
+  - name: steady_nofi_fused_again
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 90, seconds: 180}
+    env: {VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: 0, FQJ_TOPK_TOPP: 1}
+    set: {compilation-config: {"custom_ops": ["+rms_norm", "+silu_and_mul"], "pass_config": {"fuse_norm_quant": true, "fuse_act_quant": true}}}
+  - name: kept
+    objective: makespan
+    env: {FQJ_TOPK_TOPP: 1}
+  - name: nofi_fused
+    objective: makespan
+    env: {VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: 0, FQJ_TOPK_TOPP: 1}
+    set: {compilation-config: {"custom_ops": ["+rms_norm", "+silu_and_mul"], "pass_config": {"fuse_norm_quant": true, "fuse_act_quant": true}}}
+  - name: kept_again
+    objective: makespan
+    env: {FQJ_TOPK_TOPP: 1}
+  - name: nofi_fused_again
+    objective: makespan
+    env: {VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: 0, FQJ_TOPK_TOPP: 1}
+    set: {compilation-config: {"custom_ops": ["+rms_norm", "+silu_and_mul"], "pass_config": {"fuse_norm_quant": true, "fuse_act_quant": true}}}

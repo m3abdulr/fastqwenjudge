@@ -1,0 +1,21 @@
+# Not in the package: FQJ_FP8_DENSE and FQJ_FP8_LM_HEAD_TP were variants of the output-layer plugin that were not
+# kept; the shipped kernels/fp8_lm_head.py has neither (docs/serving.md).
+# Flash-Next NVFP4 serving ladder, part C (two H100s), from its first profile: 16-bit GEMMs take 22% of GPU time
+# (NVIDIA's checkpoint keeps attention, DeltaNet, the shared expert, the dense MLP and the output layer in BF16), and
+# the experts' weights are read every step, so more requests per step should pay; KV memory is 23 GiB per GPU, most of
+# it taken by the DeltaNet state (four copies per request with three drafts). Experimental FP8 conversions:
+# kernels/fp8_lm_head.py (FQJ_FP8_DENSE, FQJ_FP8_LM_HEAD with FQJ_FP8_LM_HEAD_TP for a sharded output layer).
+profile: flash_next
+data: q38_dev600.jsonl
+judges: [off_greedy, think_medium_strict]
+rungs:
+  - name: kept
+  - name: fp8dense
+    env: {FQJ_FP8_DENSE: 1}
+  - name: fp8dense_head
+    env: {FQJ_FP8_DENSE: 1, FQJ_FP8_LM_HEAD: 1, FQJ_FP8_LM_HEAD_TP: 1}
+  - name: mem92_s80
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 80}
+  - name: mem92_s96
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: kept_again

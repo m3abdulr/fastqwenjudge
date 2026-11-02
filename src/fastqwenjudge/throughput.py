@@ -29,7 +29,9 @@ COUNTERS = {"prompt_tokens": "vllm:prompt_tokens_total", "generation_tokens": "v
             "spec_accepted_tokens": "vllm:spec_decode_num_accepted_tokens_total"}
 HISTOGRAMS = {"ttft": "vllm:time_to_first_token_seconds", "itl": "vllm:inter_token_latency_seconds",
               "queue": "vllm:request_queue_time_seconds", "prefill": "vllm:request_prefill_time_seconds",
-              "decode": "vllm:request_decode_time_seconds", "step_tokens": "vllm:iteration_tokens_total"}
+              "decode": "vllm:request_decode_time_seconds", "step_tokens": "vllm:iteration_tokens_total",
+              # per request: decode time over its output tokens (vLLM's TPOT); 1 / TPOT is the request's decode speed
+              "tpot": "vllm:request_time_per_output_token_seconds"}
 GAUGES = {"running": ("vllm:num_requests_running",), "waiting": ("vllm:num_requests_waiting",),
           "kv_cache": ("vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc")}
 LINE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([-+0-9.eEinfNa]+)$")
@@ -87,13 +89,21 @@ class Monitor:
         self.start_text = self.end_text = ""
         self.start_time = self.end_time = None
 
-    async def _scrape(self, client: httpx.AsyncClient) -> str:
+    async def _scrape(self, client: httpx.AsyncClient, timeout: float = 10) -> str:
         """The servers' metrics as one text; parse_metrics sums a metric over all its lines."""
-        return "\n".join([(await client.get(url, timeout=10)).text for url in self.urls])
+        return "\n".join([(await client.get(url, timeout=timeout)).text for url in self.urls])
 
-    async def _snapshot(self) -> str:
+    async def _snapshot(self, attempts: int = 4) -> str:
+        """The first and last scrape bound the counters, so they are retried: a server busy with hundreds of image
+        requests can take longer than one scrape's timeout to answer its metrics endpoint."""
         async with httpx.AsyncClient() as client:
-            return await self._scrape(client)
+            for attempt in range(attempts):
+                try:
+                    return await self._scrape(client, timeout=30)
+                except httpx.HTTPError:
+                    if attempt == attempts - 1:
+                        raise
+                    await asyncio.sleep(2)
 
     async def _loop(self):
         async with httpx.AsyncClient() as client:
@@ -139,7 +149,7 @@ class Monitor:
             before = parse_buckets(self.start_text, name)
             buckets = {b: c - before.get(b, 0.0) for b, c in parse_buckets(self.end_text, name).items()}
             out["histograms"][key] = {"count": count, "mean": total / count if count else None,
-                                      **{f"p{q}": quantile(buckets, q / 100) for q in (50, 90, 99)}}
+                                      **{f"p{q}": quantile(buckets, q / 100) for q in (50, 90, 95, 99)}}
         out["engine_steps_per_s"] = out["histograms"]["step_tokens"]["count"] / seconds
         return out
 

@@ -1,0 +1,14 @@
+# 27B serving ladder, part F (one H100): the Qwen3-VL-32B judge's output-layer patch (FQJ_FP8_LM_HEAD, now
+# src/fastqwenjudge/kernels/fp8_lm_head.py: the BF16 output layer converted at load to 128x128-block FP8; 248,320 x
+# 5,120 here, ~9.5% of GPU time in the BF16-state profile, run once for the target and once per draft). Measured only
+# on Qwen3-VL before, so verdicts are checked against the same server without it.
+profile: experiments/qwen38/profiles/27b_start.yaml
+data: q38_dev600.jsonl
+judges: [off_greedy, think_medium_strict]
+rungs:
+  - name: bf16_s64
+    set: &win {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16,
+               max-num-seqs: 64}
+  - name: bf16_s64_fp8head
+    set: *win
+    env: {FQJ_FP8_LM_HEAD: 1}

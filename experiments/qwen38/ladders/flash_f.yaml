@@ -1,0 +1,17 @@
+# Flash-Next NVFP4 serving ladder, part F (two H100s): steady-state throughput (run.py's run_steady: 160 images in
+# flight, more than the server runs, 120 s warm-up, 240 s measured) to settle part E's near-tie between tensor parallel
+# (92% memory, 96 sequences) and data parallel + expert parallel (64 or 80 sequences per replica), without the batch
+# tail that makes single batches differ by up to 8% between identical runs.
+profile: flash_next
+data: q38_dev.jsonl
+judges: [off_greedy, think_medium_strict]
+steady: {concurrency: 160, warmup: 120, seconds: 240}
+rungs:
+  - name: tp2_m92_s96
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: dp2ep_s64
+    set: {tensor-parallel-size: 1, data-parallel-size: 2, gpu-memory-utilization: 0.92, max-num-seqs: 64}
+  - name: dp2ep_s80
+    set: {tensor-parallel-size: 1, data-parallel-size: 2, gpu-memory-utilization: 0.92, max-num-seqs: 80}
+  - name: tp2_m92_s96_again
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}

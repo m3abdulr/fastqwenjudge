@@ -2,11 +2,7 @@
 
 Results are appended to a JSONL file as they complete (one line per image), so an interrupted run picks up where
 it stopped. Images are started in input order or longest checklist first (`order`); with a client that admits
-requests by rank, the images started first also finish first. Two schedules are available for multi-step judges:
-
-  pipelined  every image runs its own compile -> observe -> decide chain; the server always has a mix of
-             text-only and image requests, and no step waits for the slowest request of the previous one.
-  staged     all compile requests, then all observations, then all decisions (one barrier per step).
+requests by rank, the images started first also finish first.
 """
 from __future__ import annotations
 
@@ -19,6 +15,15 @@ from .client import Client, request_rank
 from .data import Item, short_hash
 
 ORDERS = ("input", "longest-first")
+
+# How requests are ordered on the client. "makespan" (the default): the longest checklists start first and
+# requests of images already in progress are admitted before new ones start, so short ones fill the end of the batch
+# instead of a long chain running alone. On 600 development images it cut the batch by 4-5% (27B) and 6-13%
+# (Flash-Next) and the time with the GPU not full from 13-26% to 6-10% (thinking), with verdicts changing no more
+# than between two identical runs. "latency": images start in input order and requests are admitted in arrival
+# order, which is fair to every image.
+OBJECTIVES = {"latency": {"order": "input", "admission": "fifo"},
+              "makespan": {"order": "longest-first", "admission": "rank"}}
 
 
 def result_key(judge_name: str, item: Item) -> str:
@@ -33,7 +38,7 @@ def key_name(judge) -> str:
 def longest_first(items: list[Item]) -> list[Item]:
     """Largest-processing-time-first, the standard heuristic for makespan: the longest checklists start first, so
     the short ones fill the end of the batch instead of a long one finishing alone. Cost is estimated from the
-    requirement count, then the checklist length; images of one checklist stay together and share a compile."""
+    requirement count, then the checklist length; images of one checklist stay together."""
     return sorted(items, key=lambda i: (-len(i.requirements), -sum(map(len, i.requirements)), i.checklist_key))
 
 
@@ -65,8 +70,8 @@ class Progress:
                   flush=True)
 
 
-async def run(judge, items: list[Item], client: Client, out: str | Path, *, mode: str = "pipelined",
-              order: str = "input", progress_every: int = 100) -> dict[str, dict]:
+async def run(judge, items: list[Item], client: Client, out: str | Path, *, order: str = "input",
+              progress_every: int = 100) -> dict[str, dict]:
     if order not in ORDERS:
         raise ValueError(f"order must be one of {ORDERS}, not {order!r}")
     out = Path(out)
@@ -85,58 +90,18 @@ async def run(judge, items: list[Item], client: Client, out: str | Path, *, mode
             if error is None:
                 done[row["key"]] = row
 
-        if mode == "staged" and hasattr(judge, "observe"):
-            await _staged(judge, todo, client, write, progress_every)
-        else:
-            progress = Progress(len(todo), judge.name, progress_every)
+        progress = Progress(len(todo), judge.name, progress_every)
 
-            async def one(rank: int, item: Item):
-                request_rank.set(rank)   # each image runs in its own task, so this stays with its requests
-                try:
-                    write(item, await judge.judge(item, client))
-                    progress.tick(True)
-                except Exception as error:
-                    write(item, error=f"{type(error).__name__}: {str(error)[:500]}")
-                    progress.tick(False)
+        async def one(rank: int, item: Item):
+            request_rank.set(rank)   # each image runs in its own task, so this stays with its requests
+            try:
+                write(item, await judge.judge(item, client))
+                progress.tick(True)
+            except Exception as error:
+                write(item, error=f"{type(error).__name__}: {str(error)[:500]}")
+                progress.tick(False)
 
-            await asyncio.gather(*(one(rank, i) for rank, i in enumerate(todo)))
+        await asyncio.gather(*(one(rank, i) for rank, i in enumerate(todo)))
     keyed = {i.id: result_key(key_name(judge), i) for i in items}
     return {i: done[k]["result"] for i, k in keyed.items() if k in done}
 
-
-async def _staged(judge, items: list[Item], client: Client, write, every: int):
-    async def stage(label, work, fn):
-        progress, out = Progress(len(work), label, every), {}
-
-        async def one(key, *args):
-            try:
-                out[key] = await fn(*args)
-                progress.tick(True)
-            except Exception as error:
-                out[key] = error
-                progress.tick(False)
-
-        await asyncio.gather(*(one(k, *a) for k, a in work))
-        return out
-
-    checklists = {i.checklist_key: i.requirements for i in items}
-    plans = await stage("compile", [(k, (r, client)) for k, r in checklists.items()], judge.compile)
-    ready = [i for i in items if not isinstance(plans[i.checklist_key], Exception)]
-    for i in items:
-        if isinstance(plans[i.checklist_key], Exception):
-            write(i, error=f"compile: {plans[i.checklist_key]}")
-    observations = await stage("observe", [(i.id, (i, plans[i.checklist_key], client)) for i in ready],
-                               judge.observe)
-    ready = [i for i in ready if not isinstance(observations[i.id], Exception)]
-    decisions = await stage("decide", [(i.id, (i, plans[i.checklist_key], observations[i.id], client))
-                                       for i in ready], judge.decide)
-    for i in items:
-        if i.checklist_key not in plans or isinstance(plans[i.checklist_key], Exception):
-            continue
-        obs = observations.get(i.id)
-        if isinstance(obs, Exception):
-            write(i, error=f"observe: {obs}")
-        elif isinstance(decisions.get(i.id), Exception):
-            write(i, error=f"decide: {decisions[i.id]}")
-        else:
-            write(i, {**decisions[i.id], "plans": plans[i.checklist_key], "observations": obs})

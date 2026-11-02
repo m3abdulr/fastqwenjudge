@@ -1,0 +1,27 @@
+# Qwen3.8-Flash-Next in NVIDIA's NVFP4 checkpoint (routed experts in 4-bit, the rest 16-bit) on two H100s, for the
+# modes flash-fast and flash-quality. H100s have no FP4 tensor cores; vLLM runs the experts with its "humming"
+# mixed-precision MoE kernel. The 51-billion-parameter n-gram embedding table stays in host memory (we ran with
+# 192 GB). DeltaNet state and prefix caching as in 27b.yaml (docs/serving.md).
+model: nvidia/Qwen3.8-Flash-Next-NVFP4
+args:
+  tensor-parallel-size: 2
+  enable-expert-parallel: true
+  quantization: modelopt
+  # both kinds of experts: for the drafter's FP8 experts vLLM otherwise picks a kernel that compiles at first use,
+  # and it had not finished after 56 minutes
+  moe-backend: humming
+  gpu-memory-utilization: 0.92     # 85% held 64 sequences; 92% holds 96 (11-23% shorter batches); 95% + 128 failed
+  max-model-len: 36864
+  max-num-seqs: 96                  # the batch-time optimum for the quality mode; flash-fast raises it to 112 (modes.py)
+  mamba-ssm-cache-dtype: bfloat16
+  no-enable-prefix-caching: true
+  kv-cache-dtype: fp8
+  attention-config.indexer_kv_dtype: fp8
+  engram-config: {"cpu_offload": true}
+  reasoning-parser: qwen3
+  # the closing line the server writes when a request's thinking budget runs out (judges/single.py)
+  reasoning-config: {"reasoning_end_str": "\n\nConsidering the limited time, I have to give the final answer based on my thinking so far.\n</think>\n\n"}
+  speculative-config: {"method": "mtp", "num_speculative_tokens": 3}
+  limit-mm-per-prompt: {"image": 1, "video": 0}
+env:
+  VLLM_USE_FLASHINFER_SAMPLER: 0    # every number was measured with vLLM's own sampling kernels

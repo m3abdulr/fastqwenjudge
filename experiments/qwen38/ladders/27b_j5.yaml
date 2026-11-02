@@ -1,0 +1,22 @@
+# Not in the package: kernels/gdn_replay.py was dropped (docs/serving.md, "What was tried and not kept").
+# 27B serving ladder, part J5 (one H100): the DeltaNet replay with vLLM's k + 1 state blocks per request kept (only the
+# first is used): no memory saved, but each step writes the state once instead of k + 1 times. With one block per
+# request it was wrong under load (part J4; local count tests 80-121 / 128 correct), with k + 1 blocks 128 / 128.
+# Batch times, tokens per request and verdicts against the kept settings, each twice; longest checklists first.
+profile: 27b
+data: q38_dev600.jsonl
+judges: [off_greedy_strict, think_medium_strict]
+rungs:
+  - name: kept
+    objective: makespan
+  - name: replay
+    objective: makespan
+    env: {VLLM_GDN_DECODE_KERNEL: triton, FQJ_GDN_REPLAY: 1}
+  - name: kept_again
+    objective: makespan
+  - name: replay_again
+    objective: makespan
+    env: {VLLM_GDN_DECODE_KERNEL: triton, FQJ_GDN_REPLAY: 1}
+  - name: triton_only
+    objective: makespan
+    env: {VLLM_GDN_DECODE_KERNEL: triton}

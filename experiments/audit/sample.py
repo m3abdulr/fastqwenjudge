@@ -5,9 +5,8 @@ Two samples, merged and shuffled so the auditor cannot tell them apart:
   disagreement  images where two judges disagree on at least one requirement (only ids are taken from the
                 judge outputs; who said what is not written anywhere in the queue)
 
-    python experiments/audit/sample.py --data data/items/sol_subset.jsonl data/items/quality_ood.jsonl \
-        --random 75 --disagree experiments/quality/results/sol_subset experiments/quality/results/ood \
-        --judges neutral single_v1 --n-disagree 50 --out audit/queue.jsonl
+    python experiments/audit/sample.py --data items_a.jsonl items_b.jsonl --random 75 \
+        --disagree results/items_a results/items_b --judges fast quality --n-disagree 50 --out audit/queue.jsonl
 """
 from __future__ import annotations
 
@@ -25,7 +24,7 @@ def main():
     p.add_argument("--data", nargs="+", required=True)
     p.add_argument("--random", type=int, default=75, help="random images per dataset")
     p.add_argument("--disagree", nargs="*", default=[], help="results dirs, one per dataset, same order as --data")
-    p.add_argument("--judges", nargs=2, default=["neutral", "single_v1"])
+    p.add_argument("--judges", nargs=2, default=["fast", "quality"])
     p.add_argument("--n-disagree", type=int, default=50, help="disagreement images per dataset")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", required=True)

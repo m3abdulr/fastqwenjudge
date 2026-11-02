@@ -1,0 +1,22 @@
+# Qwen3.8-Flash-Next in Qwen's FP8 checkpoint (125B MoE, 6B active, plus a 51B n-gram embedding table and MTP) on
+# four H100s: the held-out baselines. vLLM's recipe for H100: tensor + expert parallel with the Triton MoE backend
+# (plain tensor parallel does not fit the 128-wide FP8 blocks), the n-gram table in pinned host memory, FP8 KV and
+# indexer KV, MTP drafts, max-num-seqs 256 (more fails the DeltaNet state allocation at start-up). The recipe's
+# 8-GPU command cut to 4: the weights left on the GPUs are ~135 GB.
+model: Qwen/Qwen3.8-Flash-Next-FP8
+args:
+  tensor-parallel-size: 4
+  enable-expert-parallel: true
+  moe-backend: triton
+  gpu-memory-utilization: 0.85
+  max-model-len: 36864
+  max-num-seqs: 256
+  enable-prefix-caching: true
+  kv-cache-dtype: fp8
+  attention-config.indexer_kv_dtype: fp8
+  engram-config: {"cpu_offload": true}
+  reasoning-parser: qwen3
+  speculative-config: {"method": "mtp", "num_speculative_tokens": 3}
+  limit-mm-per-prompt: {"image": 1, "video": 0}
+env:
+  VLLM_USE_FLASHINFER_SAMPLER: 0    # as every run was measured (vLLM's own sampling kernels)

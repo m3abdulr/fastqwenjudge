@@ -1,0 +1,17 @@
+# Not in the package: kernels/gdn_replay.py was dropped (docs/serving.md, "What was tried and not kept").
+# 27B serving ladder, part J3 (one H100): the DeltaNet replay (kernels/gdn_replay.py) after two integration fixes
+# (part J: the rings only in the KV cache spec, binding and page planning; part J2 showed the eager path's state
+# table one column wide, so the convolution saw one window token: the window width now comes from the metadata
+# builder). Engine check first: greedy outputs match vLLM's own run as often as a second vLLM run does (12 of 16).
+# Batch times and verdicts against the kept settings, then up to 96 sequences in the memory the replay frees.
+profile: 27b
+data: q38_dev600.jsonl
+judges: [off_greedy_strict, think_medium_strict]
+rungs:
+  - name: kept
+  - name: replay
+    env: {VLLM_GDN_DECODE_KERNEL: triton, FQJ_GDN_REPLAY: 1}
+  - name: replay_s96
+    env: {VLLM_GDN_DECODE_KERNEL: triton, FQJ_GDN_REPLAY: 1}
+    set: {max-num-seqs: 96}
+  - name: kept_again

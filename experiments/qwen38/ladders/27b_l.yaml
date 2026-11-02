@@ -1,0 +1,47 @@
+# 27B serving ladder, part L (one H100): the batch's tail. A batch ends with a few long chains running on an emptying
+# GPU; there, decoding is bound by reading the weights, so more drafts per step are nearly free, and memory is spare.
+# Every request's start, time and tokens are recorded (<judge>_requests.jsonl) to measure the tail itself, not only
+# the batch's time (whose run-to-run noise was larger than the whole tail). Part G2 tried 5 drafts at <=16 running:
+# 4.2-4.3 tokens accepted per step there against 3.4 with 3, but no batch-time gain could be resolved. Here: 5 and 7
+# drafts as the batch empties; the longest checklists first (makespan); each also as 5 batches of 120 (a caller with
+# small batches has five tails); and the 847 reasoning development images (the longest chains) in the quality mode.
+profile: 27b
+data: q38_dev600.jsonl
+judges: [off_greedy_strict, think_medium_strict]
+rungs:
+  - name: kept
+  - name: tail5
+    set: {speculative-config: {"method": "mtp", "num_speculative_tokens": 5,
+                               "num_speculative_tokens_per_batch_size": [[1, 16, 5], [17, 64, 3]]}}
+  - name: tail7
+    set: {speculative-config: {"method": "mtp", "num_speculative_tokens": 7,
+                               "num_speculative_tokens_per_batch_size": [[1, 8, 7], [9, 16, 5], [17, 64, 3]]}}
+  - name: makespan
+    objective: makespan
+  - name: kept_c5
+    chunks: 5
+  - name: tail5_c5
+    chunks: 5
+    set: {speculative-config: {"method": "mtp", "num_speculative_tokens": 5,
+                               "num_speculative_tokens_per_batch_size": [[1, 16, 5], [17, 64, 3]]}}
+  - name: tail7_c5
+    chunks: 5
+    set: {speculative-config: {"method": "mtp", "num_speculative_tokens": 7,
+                               "num_speculative_tokens_per_batch_size": [[1, 8, 7], [9, 16, 5], [17, 64, 3]]}}
+  - name: makespan_c5
+    chunks: 5
+    objective: makespan
+  - name: reasoning_kept
+    data: r3_dev_reasoning.jsonl
+    judges: [think_medium_strict]
+  - name: reasoning_tail5
+    data: r3_dev_reasoning.jsonl
+    judges: [think_medium_strict]
+    set: {speculative-config: {"method": "mtp", "num_speculative_tokens": 5,
+                               "num_speculative_tokens_per_batch_size": [[1, 16, 5], [17, 64, 3]]}}
+  - name: reasoning_tail7
+    data: r3_dev_reasoning.jsonl
+    judges: [think_medium_strict]
+    set: {speculative-config: {"method": "mtp", "num_speculative_tokens": 7,
+                               "num_speculative_tokens_per_batch_size": [[1, 8, 7], [9, 16, 5], [17, 64, 3]]}}
+  - name: kept_again

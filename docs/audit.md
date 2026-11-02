@@ -41,3 +41,9 @@ any local judge had produced an output on those images:
 - **Round-3 held-out set:** 160 random images (130 main task, 30 reasoning), graded by six fresh Claude sessions in
   parallel, each given only these rules and its slice of the queue. Unlike the earlier audits, the auditors knew
   nothing about the judge's known failure modes.
+
+## For the Qwen3.8 release
+
+No new audit was run. The held-out tables in [results.md](results.md) use the round-3 audit, which was graded before
+any Qwen3.8 judge existed and so is blind to them as well; development numbers use the 263 audited development images
+(111 main-task) of the earlier rounds. `experiments/audit/sample.py` builds a queue the same way for a new set.

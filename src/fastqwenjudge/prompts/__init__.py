@@ -15,24 +15,12 @@ def array_of(name: str, properties: dict) -> dict:
     return obj({name: {"type": "array", "items": obj(properties)}})
 
 
-NULLABLE_INT = {"type": ["integer", "null"]}
-
+# No maxLength on the evidence: with any bound, xgrammar 0.2.8 builds each token's mask ~10x slower (224 against 21 us),
+# which left the GPU waiting on it (docs/serving.md). The request's max_tokens bounds an answer that loops.
 VERDICTS = array_of("items", {"id": {"type": "integer"}, "evidence": {"type": "string"},
                               "satisfied": {"type": "boolean"}})
 
-PLANS = array_of("plans", {
-    "id": {"type": "integer"},
-    "kind": {"type": "string", "enum": ["count", "absence", "universal", "other"]},
-    "subject": {"type": "string"},
-    "question": {"type": "string"},
-    "comparator": {"type": "string", "enum": ["eq", "ge", "le", "none"]},
-    "expected": NULLABLE_INT,
-})
-
-OBSERVATIONS = array_of("observations", {
-    "id": {"type": "integer"}, "evidence": {"type": "string"}, "count": NULLABLE_INT, "total": NULLABLE_INT,
-    "matching": NULLABLE_INT, "uncertain": {"type": "boolean"},
-})
+CHECKLIST = obj({"requirements": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 20}})
 
 
 def numbered(lines) -> str:

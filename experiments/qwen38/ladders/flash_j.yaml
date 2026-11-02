@@ -1,0 +1,31 @@
+# Flash-Next NVFP4 serving ladder, part J (two H100s): the cap from the steady-state sweep (part G: tensor parallel at
+# 112 sequences 8.39 / 3.83 images/s against 7.49-7.69 / 3.58-3.67 at 96, the same time per image; 128 lower on
+# quality; part H: data parallel at 56 per replica 8.47 / 3.62, at 48 per replica 7.94 / 3.77) checked on batches,
+# where the tail counts, with the longest checklists first (the CLI's default since part L), verdicts kept: 600
+# regular images in both modes and the 847 reasoning images in the quality mode, 112 twice.
+profile: flash_next
+data: q38_dev600.jsonl
+judges: [off_greedy, think_medium_strict]
+rungs:
+  - name: tp2_s96
+    objective: makespan
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: tp2_s112
+    objective: makespan
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 112}
+  - name: dp2ep_s56
+    objective: makespan
+    set: {tensor-parallel-size: 1, data-parallel-size: 2, gpu-memory-utilization: 0.92, max-num-seqs: 56}
+  - name: tp2_s112_again
+    objective: makespan
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 112}
+  - name: reasoning_s96
+    objective: makespan
+    data: r3_dev_reasoning.jsonl
+    judges: [think_medium_strict]
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: reasoning_s112
+    objective: makespan
+    data: r3_dev_reasoning.jsonl
+    judges: [think_medium_strict]
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 112}

@@ -1,0 +1,38 @@
+# 27B serving ladder, part P (one H100): vLLM's fusions of RMSNorm and SiLU-and-mul into the FP8 block quantization of
+# the next matmul's input (rms_norm_per_block_quant, silu_and_mul_per_block_quant, group size 128). Off by default:
+# they need vLLM's own norm and activation ops instead of torch.compile's. In whole-batch profiles of the settings
+# shipped then (the first whole-batch capture, before the three-pass sampler; 600 development images) the kernels the roofline
+# model does not count take 25 s of the quality batch's 166 s and 19 s of the fast batch's 96 s; activation
+# quantization alone is 7.4 / 4.9 s (848,265 calls in the quality batch, about 290 a step). Steady state at 192 in flight, then batches of the 600 for
+# time and verdict flips; each setting twice, alternating.
+# Result (cancelled after 3 steady rungs): kept 5.94 / 3.12 and 5.96 / 3.09, fused 5.96 / 3.15 images/s, the
+# same graph: the matmuls' input quantization sits inside one FlashInfer / DeepGEMM op the passes cannot see into.
+# Followed by part Q2.
+profile: 27b
+data: q38_dev600.jsonl
+judges: [off_greedy_strict, think_medium_strict]
+rungs:
+  - name: steady_kept
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 90, seconds: 180}
+  - name: steady_fused
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 90, seconds: 180}
+    set: {compilation-config: {"custom_ops": ["+rms_norm", "+silu_and_mul"], "pass_config": {"fuse_norm_quant": true, "fuse_act_quant": true}}}
+  - name: steady_kept_again
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 90, seconds: 180}
+  - name: steady_fused_again
+    data: q38_dev.jsonl
+    steady: {concurrency: 192, warmup: 90, seconds: 180}
+    set: {compilation-config: {"custom_ops": ["+rms_norm", "+silu_and_mul"], "pass_config": {"fuse_norm_quant": true, "fuse_act_quant": true}}}
+  - name: kept
+    objective: makespan
+  - name: fused
+    objective: makespan
+    set: {compilation-config: {"custom_ops": ["+rms_norm", "+silu_and_mul"], "pass_config": {"fuse_norm_quant": true, "fuse_act_quant": true}}}
+  - name: kept_again
+    objective: makespan
+  - name: fused_again
+    objective: makespan
+    set: {compilation-config: {"custom_ops": ["+rms_norm", "+silu_and_mul"], "pass_config": {"fuse_norm_quant": true, "fuse_act_quant": true}}}

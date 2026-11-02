@@ -1,0 +1,24 @@
+# Qwen3.8-Flash-Next in NVIDIA's NVFP4 checkpoint (routed experts 4-bit NVFP4, the rest of the language model BF16,
+# the MTP head's experts FP8 in 128x128 blocks, the n-gram table FP8) on two H100s, before its ladder: the four-GPU
+# FP8 profile's flags with expert parallel and 128 sequences. H100s have no FP4 tensor cores; vLLM runs the 4-bit
+# experts with its "humming" MoE kernel. Humming for both kinds of experts: for the FP8 MTP experts vLLM picks
+# FlashInfer CUTLASS, which compiles its kernels at first use and had not finished after 56 minutes; Triton, the FP8
+# profile's choice, is not offered for NVFP4. The ladder's result is the package's profiles/flash_next.yaml.
+model: nvidia/Qwen3.8-Flash-Next-NVFP4
+args:
+  tensor-parallel-size: 2
+  enable-expert-parallel: true
+  quantization: modelopt
+  moe-backend: humming
+  gpu-memory-utilization: 0.85
+  max-model-len: 36864
+  max-num-seqs: 128
+  enable-prefix-caching: true
+  kv-cache-dtype: fp8
+  attention-config.indexer_kv_dtype: fp8
+  engram-config: {"cpu_offload": true}
+  reasoning-parser: qwen3
+  speculative-config: {"method": "mtp", "num_speculative_tokens": 3}
+  limit-mm-per-prompt: {"image": 1, "video": 0}
+env:
+  VLLM_USE_FLASHINFER_SAMPLER: 0    # as every run was measured (vLLM's own sampling kernels)

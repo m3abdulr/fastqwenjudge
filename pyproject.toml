@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fastqwenjudge"
-version = "0.1.0"
-description = "Fast, frontier-verified checklist judging of generated images with Qwen3-VL-32B on vLLM"
+version = "0.2.0"
+description = "Checklist judging of generated images with Qwen3.8 on one or two H100s, via vLLM"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Mohammed Abdulrahman" }]
@@ -18,19 +18,24 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-serve = ["vllm>=0.32"]
-hf = ["torch>=2.4", "transformers>=4.57", "accelerate", "pillow"]
-plots = ["matplotlib>=3.8"]
+serve = ["vllm==0.32.*"]   # the two plugins patch vLLM 0.32 internals
 
 [project.scripts]
 fastqwenjudge = "fastqwenjudge.cli:main"
 
-# opt-in (FQJ_FUSED_KERNELS=1): Qwen3-VL decoder layers with fused norm/SiLU + FP8 kernels, see kernels/qwen3vl.py
+# opt-in through the server environment, both set by profiles/27b.yaml: FQJ_FP8_LM_HEAD=1, the output layer in block
+# FP8 (kernels/fp8_lm_head.py); FQJ_TOPK_TOPP=1, the three-pass top-k / top-p mask (kernels/topk_topp.py)
 [project.entry-points."vllm.general_plugins"]
-fastqwenjudge_fused_kernels = "fastqwenjudge.kernels.qwen3vl:register"
+fastqwenjudge_fp8_lm_head = "fastqwenjudge.kernels.fp8_lm_head:register"
+fastqwenjudge_topk_topp = "fastqwenjudge.kernels.topk_topp:register"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fastqwenjudge"]
+
+# the sdist is built from an explicit list
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "docs", "examples", "experiments/qwen38", "experiments/audit/sample.py",
+                "experiments/audit/record.py", "README.md", "LICENSE", "pyproject.toml"]
 
 [tool.ruff]
 line-length = 120

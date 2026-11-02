@@ -1,0 +1,18 @@
+# Correction (2026-10-31): the 11% below came from an 8-s profile; over a whole batch the top-k / top-p kernel took
+# 7.8 s of 166 (about 5%; docs/roofline.md). This part measured vLLM's sampler switches, which did not change it.
+# 27B serving ladder, part H (one H100): the profile at the kept settings puts 11% of the thinking judge's GPU time in
+# sampling (vLLM's Triton top-k/top-p kernel over the 248,320-token vocabulary, ~2.6 ms per call). FlashInfer's fused
+# sampler would do it, but vLLM falls back to a slow path for requests with their own seed (every request here has
+# one; the stall in part D's FlashInfer rung). Requests without a seed, with FlashInfer's sampler.
+profile: 27b
+data: q38_dev600.jsonl
+judges: [off_greedy_strict, think_medium_strict]
+rungs:
+  - name: kept
+  - name: noseed_fis
+    seed: null
+    env: {VLLM_USE_FLASHINFER_SAMPLER: 1}
+  - name: kept_again
+  - name: noseed_fis_again
+    seed: null
+    env: {VLLM_USE_FLASHINFER_SAMPLER: 1}

@@ -1,0 +1,20 @@
+# Flash-Next NVFP4 serving ladder, part K (two H100s): top-k first sampling masks, as 27B part M; quality mode only,
+# tensor parallel at 92% / 96 sequences, each twice.
+profile: flash_next
+data: q38_dev600.jsonl
+judges: [think_medium_strict]
+rungs:
+  - name: kept
+    objective: makespan
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: topk_first
+    objective: makespan
+    env: {FQJ_TOPK_FIRST: 1}
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: kept_again
+    objective: makespan
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: topk_first_again
+    objective: makespan
+    env: {FQJ_TOPK_FIRST: 1}
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}

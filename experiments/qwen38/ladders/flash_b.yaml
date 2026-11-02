@@ -1,0 +1,11 @@
+# Flash-Next NVFP4 serving ladder, part B (two H100s): vLLM turns on its breakable CUDA graphs for this model, and with
+# them torch.compile off ("Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1"); the 27B runs with torch.compile and full
+# CUDA graphs. The kept settings (profiles/flash_next.yaml) against the same with breakable graphs off.
+profile: flash_next
+data: q38_dev600.jsonl
+judges: [off_greedy, think_medium_strict]
+rungs:
+  - name: kept
+  - name: compiled
+    env: {VLLM_USE_BREAKABLE_CUDAGRAPH: 0}
+  - name: kept_again              # anchor repeated: node drift

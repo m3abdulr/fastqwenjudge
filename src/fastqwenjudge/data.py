@@ -7,7 +7,7 @@ Datasets are JSONL files, one image per line:
      "image": "images/geneval_0359_original.png", "group": "geneval", "variant": "original"}
 
 `image` is resolved relative to the JSONL file. `group` and `variant` are free-form labels used in reports.
-Requirements should be declarative statements; yes/no questions confuse the neutral judge's compile step.
+Requirements should be declarative statements, not questions (docs/checklists.md).
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class Item:
 
     @property
     def checklist_key(self) -> str:
-        """Items that share a checklist share one compiled plan."""
+        """Items with the same checklist share this key."""
         return short_hash(list(self.requirements))
 
     def image_url(self) -> str:

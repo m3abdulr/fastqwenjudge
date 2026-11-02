@@ -1,0 +1,27 @@
+# Not in the package: kernels/gdn_replay.py was dropped (docs/serving.md, "What was tried and not kept").
+# 27B serving ladder, part J4 (one H100): the DeltaNet replay after the fix for reused blocks (a new request's
+# convolution state is cleared before its prefill; in eager tests with a checkable answer the replay went from 8 to
+# 32 of 32 correct, and with CUDA graphs it is 32 / 32). Batch times, tokens per request (part J3's runaway outputs
+# showed there) and verdicts against the kept settings; up to 96 sequences in the memory the replay frees; and 5
+# drafts while at most 16 run, which without the replay cost a state copy per draft (part L: 37 running, 279 s).
+# All rungs with the longest checklists first (the CLI's default).
+profile: 27b
+data: q38_dev600.jsonl
+judges: [off_greedy_strict, think_medium_strict]
+rungs:
+  - name: kept
+    objective: makespan
+  - name: replay
+    objective: makespan
+    env: {VLLM_GDN_DECODE_KERNEL: triton, FQJ_GDN_REPLAY: 1}
+  - name: replay_s96
+    objective: makespan
+    env: {VLLM_GDN_DECODE_KERNEL: triton, FQJ_GDN_REPLAY: 1}
+    set: {max-num-seqs: 96}
+  - name: replay_tail5
+    objective: makespan
+    env: {VLLM_GDN_DECODE_KERNEL: triton, FQJ_GDN_REPLAY: 1}
+    set: {speculative-config: {"method": "mtp", "num_speculative_tokens": 5,
+                               "num_speculative_tokens_per_batch_size": [[1, 16, 5], [17, 64, 3]]}}
+  - name: kept_again
+    objective: makespan

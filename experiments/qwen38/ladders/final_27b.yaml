@@ -1,0 +1,21 @@
+# Final run, 27B (one H100): the lineup frozen before the run (docs/results.md). The 0-10 judges first on the
+# development images (their pass mark), then every judge once on the held-out set, then one image at a time for
+# latency.
+profile: experiments/qwen38/profiles/27b_start.yaml
+judges: [off_greedy_strict, think_medium_strict, score10_off, score10_medium]
+rungs:
+  - name: dev_score10
+    data: q38_dev.jsonl
+    judges: [score10_off, score10_medium]
+    set: &final {enable-prefix-caching: null, no-enable-prefix-caching: true, mamba-ssm-cache-dtype: bfloat16,
+                 max-num-seqs: 64}
+    env: &fp8head {FQJ_FP8_LM_HEAD: 1}
+  - name: heldout
+    data: r3_everything.jsonl
+    set: *final
+    env: *fp8head
+  - name: latency
+    data: r3_lat30.jsonl
+    max_concurrency: 1
+    set: *final
+    env: *fp8head

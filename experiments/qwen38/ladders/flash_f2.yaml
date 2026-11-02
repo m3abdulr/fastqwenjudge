@@ -1,0 +1,16 @@
+# Flash-Next NVFP4 serving ladder, part F2 (two H100s): part F again for its repeats (its last rung failed on the
+# metrics endpoint's final scrape under full load, now retried): steady-state throughput, tensor parallel at 92% / 96
+# sequences against data parallel + expert parallel at 64 per replica, each twice.
+profile: flash_next
+data: q38_dev.jsonl
+judges: [off_greedy, think_medium_strict]
+steady: {concurrency: 160, warmup: 120, seconds: 240}
+rungs:
+  - name: tp2_m92_s96
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: dp2ep_s64
+    set: {tensor-parallel-size: 1, data-parallel-size: 2, gpu-memory-utilization: 0.92, max-num-seqs: 64}
+  - name: tp2_m92_s96_again
+    set: {gpu-memory-utilization: 0.92, max-num-seqs: 96}
+  - name: dp2ep_s64_again
+    set: {tensor-parallel-size: 1, data-parallel-size: 2, gpu-memory-utilization: 0.92, max-num-seqs: 64}

@@ -1,326 +1,286 @@
 # Serving: how fast, and why
 
-Everything here runs on one H100 80 GB (SXM) unless it says otherwise, on vLLM 0.32. Throughput is images per
-second at a fixed number of requests in flight; a batch's time is measured to its last verdict, which is what a
-pipeline waiting on the judge actually waits for. Price assumes $3 per H100-hour. Every serving change that can
-move verdicts (weights, KV cache, kernels) was re-checked for agreement with GPT-6 Sol and the blind audit,
-because changing numerics changes verdicts.
+Everything here runs on H100 80 GB (SXM) GPUs with vLLM 0.32.0. A **batch time** is the time to judge every image of a
+set submitted at once; **steady state** keeps a fixed number of images in flight for a few minutes and counts images
+per second; **time per image** is the time a request spends running on the server (prefill + decode), without
+queueing. Development numbers are on 600 main-task images (or the 847 that need reasoning); held-out numbers on the
+1,000 of [results.md](results.md). Settings were compared inside one job, against an anchor run at the start and
+repeated at the end: the same settings measured up to 27% apart on two different nodes (6.4 against 8.1 images/s), and
+usually 1-7% apart inside one job (once 26%: 134 s against 106 s).
 
-![One judge request through the stack, with each change and its measured gain](figures/stack.svg)
+## The shipped settings
 
-## Fast mode
+| Setting | 27B (`profiles/27b.yaml`) | Flash-Next (`profiles/flash_next.yaml`) | Why |
+|---|---|---|---|
+| Checkpoint | Qwen's FP8 (128x128 blocks) | NVIDIA's NVFP4 (experts in 4-bit, the rest 16-bit) | Flash-Next's FP8 checkpoint needed four GPUs |
+| GPUs | 1 | 2: tensor parallel, experts split between them | |
+| Requests running at once | 64 | 96; 112 for `flash-fast` | measured, below |
+| GPU memory for vLLM | 90% (vLLM's default) | 92% | Flash-Next at 95% with 128 requests failed to start |
+| DeltaNet state | 16-bit (the checkpoint asks for 32) | 16-bit | the state is copied per draft token; half the bytes |
+| Prefix caching | off | off | every request has its own image: little to share, and it costs cache |
+| KV cache | FP8 | FP8 (and the sparse-attention indexer's) | |
+| Draft tokens | the checkpoint's MTP head, 3 per step | the same | worth ~40% to the 27B's thinking judge |
+| Output layer | block FP8 (our vLLM plugin) | 16-bit | 4% on the 27B; no gain on Flash-Next |
+| Top-k / top-p mask | three passes (our vLLM plugin) | vLLM's | 7% more images per second for the 27B's quality judge in steady state; no gain on Flash-Next beyond its noise |
+| Context | 36,864 tokens | 36,864 | prompt and image (1.5-2k tokens) plus up to 32,768 output |
+| Reasoning cut at | 8,192 tokens | 8,192 | below |
+| Order of a batch | the longest checklists first | the same | below |
 
-### Where the time goes
+Flash-Next's 51-billion-parameter n-gram embedding table stays in host memory (`engram-config: cpu_offload`), and its
+experts run on vLLM's "humming" mixed-precision kernel: H100s have no FP4 tensor cores, so the 4-bit weights are
+unpacked inside the matmul.
 
-PyTorch profiles taken inside the server under the real judge load
-(`experiments/kernels/profile_server.py`), share of GPU kernel time with FlashInfer and n-gram drafts (the
-ladder's step before the fused kernels):
-
-| Images in flight | GPU busy | FP8 matmuls | Attention | BF16 matmuls (vision, output layer) | Small elementwise kernels |
-|---:|---:|---:|---:|---:|---:|
-| 1 | 92% | 74% | 14% | 3% | 8% |
-| 64 | 95% | 55% | 25% | 3% | 17% |
-| 256 | 96% | 52% | 30% | 3% | 15% |
-
-Per image at full load the judge computes about 1,740 prompt tokens and generates about 1,090. The matmuls are
-about 180 TFLOP per image (90 ms at the FP8 peak) and decode attention reads about 220 GB of FP8 KV cache (66 ms
-at 3.35 TB/s). With the small kernels' memory floor and the BF16 vision encoder, the floor is about 192 ms per
-image, 5.2 images/s. That setup runs at 322 ms per image, 3.1 images/s, about 60% of that floor: the matmuls
-are at about 57% of the FP8 peak, attention at about 78% of its bandwidth bound, and the small elementwise kernels
-(RMSNorm, the FP8 activation conversions, SiLU x mul, MRoPE) take 46 ms against a 24 ms floor.
-
-### The ladder
-
-![Fast mode serving ladder](figures/fast_ladder.png)
-
-Full table, including energy, MFU and MBU: [ladder.md](ladder.md). Accuracy on the ladder is full-image agreement
-(the judge and Sol agree that every requirement holds) on 2,106 GenEval and GenAI-Bench images with Sol labels (all
-but two of them in the final evaluation set), with the first version of the neutral judge before the presence fix:
-the ladder checks that serving changes leave verdicts alone. The judge changes that raised agreement came after it
-([results.md](results.md)). Two steps reuse another step's verdicts instead of judging again: vLLM's defaults use
-the tuned BF16 server's (same weights and precision), and n-gram speculation uses FlashInfer's (the drafts only
-propose tokens the model then checks).
-
-- **Tuned server, BF16 (1.5x).** vLLM's defaults, with the three flags needed to start and stay up on one H100 (a
-  6,144-token context instead of the model's 256K, no video inputs, the multimodal cache off), hold 20,320 tokens of
-  KV cache, about 15 running requests. The tuned server gives vLLM 95% of GPU memory instead of 90%, caps images at
-  1 megapixel and sizes the scheduler for image requests (64 sequences, 8,192 batched tokens): the KV cache doubles
-  to 41,776 tokens, and the KV cache, not compute, decides how many image requests run at once.
-- **FP8 weights (3.6x).** Qwen's block-quantized FP8 checkpoint frees about 29 GiB for KV cache and halves the
-  bytes each decode step reads. Full-image agreement with Sol 83.0% to 83.5%.
-- **FP8 KV cache (4.8x).** Twice the tokens in the same memory, so 256 requests fit.
-- **FlashInfer attention (5.5x).** At 256 in flight attention was 40% of GPU time; FlashInfer's FP8 decode kernel
-  cut it to 30% (+14% at full load, 6% slower for one image alone).
-- **n-gram speculation while at most 96 requests run.** Drafts the next 3 tokens by copying from earlier text,
-  which a judge does a lot (JSON keys, restated requirements). Always on, it is +76% at one image in flight and
-  -19% at 256, where checking the drafts costs real compute; vLLM's draft-length schedule turns it off above 96
-  running. The 1,000-image batch: 424 s to 383 s, with its tail halved.
-- **Fused RMSNorm / SiLU + FP8 quantization kernels.** Triton kernels, written for Qwen3-VL's decoder layer shapes,
-  that fuse the norm or activation with the FP8 conversion of the next matmul's input. They write the same FP8
-  bytes and scales as vLLM's path, except for rare reduction-order differences at large batch. A vLLM plugin
-  swaps them in (`FQJ_FUSED_KERNELS=1`). +1% on its own; the output layer in block FP8 adds another +1%.
-
-Final: 3.17 images/s at full load, 5.6x vLLM's defaults, 218 J per image; a 1,000-image batch in 375 s, $0.31 at
-$3 per H100-hour. Full-image agreement with Sol 83.6% against 83.0% at the start (the 95% intervals are about
-+-1.6 points). On the round-3 held-out set, with the judge as it ships, the fast mode takes 431 s per 1,000
-images (2.32 images/s, $0.36); the ladder's batches still had the fixed output limit described under "Long
-checklists" below.
-
-Not adopted:
-
-- **An EAGLE-3 draft head trained on judge traces.** 2.68 tokens per verification step, the best drafter at low
-  load (with FlashAttention: 6.4 s per image alone vs 9.3 s with n-gram, +11-36% throughput up to 128 in flight),
-  but 17% slower at 256
-  and out of memory or host-bound with FlashInfer. It is the best setup for RL-sized batches (below), not for
-  large batches.
-- **A custom Triton FP8 block-scaled GEMM.** Faster than vLLM 0.11's matmul at small batch (1.26x at one token),
-  slower than vLLM 0.32's DeepGEMM path at every size (7% at one token, 1.2-3.7x from 32 tokens up).
-- **vLLM's own norm/quant fusion passes.** -8.8% at one image in flight, +2.4% at 256: they replace
-  torch.compile's fusions with kernels that are not faster here.
-- **Tensor parallelism on two GPUs.** 4% less throughput than two independent servers, though 1.3x faster for a
-  single image.
-
-### More GPUs, and the batch against the API judges
-
-One independent server per GPU, with a client that sends each request to the server that already holds its
-prompt's prefix. On 3,800 images of the final evaluation set:
-
-| Setup | Batch time | Images/s | Per GPU | $/1,000 images |
-|---|---:|---:|---:|---:|
-| vLLM defaults, 1 GPU (500 images) | 756 s | 0.66 | 0.66 | 1.26 |
-| fast mode, 1 GPU | 1,011 s | 3.76 | 3.76 | 0.22 |
-| fast mode, 2 GPUs | 509 s | 7.47 | 3.74 | 0.22 |
-| fast mode, 4 GPUs | 289 s | 13.14 | 3.28 | 0.25 |
-
-For comparison, GPT-6 Sol's batch API returned 700 of these images in 7 minutes ($3.71 per 1,000) and Gemini 3.1
-Pro's in 27 minutes ($5.92 per 1,000); the fast mode judged all 3,800 in 17 minutes on one GPU and in 5 on four.
-API prices depend on the checklists and the reasoning they trigger: on the round-3 held-out images Sol costs $5.51
-per 1,000 and Gemini $5.84. There, Sol's batch API returned the 800 main-task images in 13.4 minutes and the 200
-reasoning images in 4.9 (two batches), and Gemini's its 350 in about 6; the fast mode takes 7.2 minutes for all
-1,000 and the quality mode 8.3. Batch turnaround depends on the provider's queue (both promise only 24 hours) and
-barely grows with the batch, while a local batch grows linearly per GPU: the case for the local judge is price,
-predictability and no rate limits more than raw speed.
-
-## Quality mode
+## Qwen3.8-27B on one H100
 
 ### The ladder
 
-The Thinking model judges in one request but writes about 870 output tokens per image, most of them reasoning
-(about 1,100 with BF16 weights quantized at load), so its batch is decode-bound and long chains decide when it
-ends. Measured on 600 development images, one H100:
-
-![Quality mode serving ladder](figures/quality_ladder.png)
-
-| Setting | 600 images | Images/s | J/image | $/1,000 images | Statements vs Sol |
-|---|---:|---:|---:|---:|---:|
-| BF16 weights quantized to FP8 at load, 64 in flight | 529-548 s | 1.10-1.13 | 485-488 | 0.73-0.76 | 91.1-91.5 |
-| 128 in flight | 484 s | 1.24 | 449 | 0.67 | 91.3 |
-| 256 in flight | 371 s | 1.62 | 368 | 0.52 | 91.5 |
-| Qwen's FP8 checkpoint, 128 in flight | 224-237 s | 2.53-2.67 | 238-245 | 0.31-0.33 | 91.0 |
-| FP8 checkpoint, 256 in flight | 241 s | 2.49 | 252 | 0.34 | 91.0 |
-| + n-gram drafts while at most 16 run | 214 s | 2.80 | 230 | 0.30 | 90.9 |
-| **+ thinking budget, 8,192 tokens (shipped)** | **223 s** | **2.69** | **235** | **0.31** | **90.9** |
-| n-gram drafts while at most 96 run | 287 s* | 2.09 | 286 | 0.40 | 90.9 |
-| n-gram drafts always | 270 s | 2.22 | 290 | 0.38 | 90.8 |
-| FlashAttention instead of FlashInfer | 296 s | 2.02 | 303 | 0.41 | 91.3 |
-
-\* one long chain ran alone for the last 60 s. Ranges are two runs of the same setting. Re-running the same
-setting changes 4% of verdicts with the BF16 weights and under 0.5% with the FP8 checkpoint. The budget never
-triggers on these 600 images (the longest chain thought for 4,677 tokens): its row is the same batch again, and
-the 9 s difference is within the spread of repeated runs.
-
-On the 1,000-image held-out set the final setting takes 497 s (997 s for the first one, 815 s on vLLM's defaults
-with the same checkpoint), with the same
-statement agreement with Sol as before tuning; against the audit it is 83.8% of statements against 85.3%
-([results.md](results.md)).
-
-Most of the gain is the checkpoint (below), then 128 in flight and n-gram drafts in the tail. The budget adds
-little to a batch's time on main-task prompts; it bounds runaway chains on reasoning prompts and in RL steps.
-
-### Why the checkpoint is 2x
-
-![Requests running over time for the two FP8 paths](figures/quality_tail.png)
-
-Both FP8 paths decode at the same speed: about 37 ms per step and about 3,000 generated tokens/s while the batch
-is full. The difference is the tail. The two paths quantize differently: at load, vLLM quantizes every linear
-layer, the vision tower's included, while Qwen's checkpoint uses 128x128 weight blocks and keeps the vision tower
-in BF16. With the load-time weights the model wrote 26% more tokens (1,094 against 870 per image), and a handful
-of very long chains kept the batch open for another 250 s at 50-250 tokens/s. Which difference makes the chains
-longer was not isolated. A batch's time is its full-batch phase plus its longest chain, which is also why single
-runs of the same setting differ by up to 15%.
-
-More than 128 in flight does not help: at 256 the KV cache is full and 50-80 requests wait.
-
-### Speculative decoding for reasoning chains
-
-A lone chain decodes at about 72 tokens/s, so the tail is exactly where speculative decoding should pay. To see
-how much, the reasoning chains of 600 images were captured and decoding was replayed offline with vLLM's own
-drafters, then simulated batch by batch with a step-time model fitted to our server logs (11.4 ms per step + 0.14
-ms per running request + 0.09 ms per drafted token checked; median error 3%).
-
-![Tokens per verification step by position in the chain](figures/draft_acceptance.png)
-
-- Chains are long-tailed: median 602 output tokens, the longest 10% at 1,762 or more and 34% of all tokens.
-- Later text is easier to guess: n-gram goes from 1.37 tokens per step in a chain's first 500 tokens to 2.00 past
-  4,000. Suffix decoding, which also matches against every other request's output, goes from 1.85 to 2.67 (1.97
-  overall); 15% of 8-token phrases also appear in other chains.
-- A longer draft as the batch empties gains little for a 1,000-image batch: the phase with at most 16 requests
-  running is about 18% of the batch (27% for 64), and suffix decoding already limits its own drafts by
-  confidence. Simulated: n-gram while at most 16 run -7.1% (measured: -7%), suffix decoding while at most 64 run
-  -10.4%, with a growing cap -10.7%.
-
-What happened when suffix decoding ran for real:
-
-- **Arctic Inference's suffix decoding (CPU) on vLLM 0.32.** vLLM allows async scheduling (preparing the next step
-  while the GPU runs this one) only for drafters that run on the GPU. A CPU drafter needs each step's sampled
-  tokens on the host before it can draft, so every step stops the GPU. The suffix tree itself is cheap (about 20
-  us per request per step), and the job used 1.3 of its 4 CPU cores, so more cores do not help. vLLM 0.32's suffix
-  proposer also asserts a fixed draft length, so a batch-size schedule crashes the engine; a small private patch
-  that treats the scheduled length as a cap made it run. Result: always on 509 s against 227 s without drafts
-  (both without async scheduling), at most 64 running 347 s, at most 16 running 277 s; one image alone 9.4 s
-  against 8.7 s with GPU n-gram, despite better guesses (1.82 against 1.51 tokens per step).
-- **GPU suffix decoding (vLLM PR #60339, Model Runner V2), ported privately to 0.32.** The open pull request moves
-  suffix matching onto the GPU, with a corpus of finished responses, so it works with async scheduling. A lone
-  request decodes about 2.2x faster (145-170 tokens/s), but always on it costs the full-batch phase 40%, and used
-  only while at most 16 run it ties GPU n-gram on the 600-image batch (219-232 s against 214 s). Its adaptive
-  verification, which trims drafts at full load, needs FlashAttention on H100: FlashInfer supports it only on
-  Blackwell. The PR also skips its cross-request corpus for seeded sampled requests, to keep them reproducible.
-
-So for large batches the quality mode keeps GPU n-gram in the tail. For RL-sized batches, drafts on at every size
-help a lot, and GPU suffix decoding is promising once it lands upstream.
-
-### Reasoning prompts, and the thinking budget
-
-Prompts that need reasoning (R2I-Bench, T2I-CoReBench's reasoning dimensions) make the Thinking model think about
-twice as long. Captured on 847 reasoning development images and the 600 main-task images above, same server
-setup, one request per image:
-
-| Prompt source | Images | Requirements | Output tokens per image (mean / median / p99 / max) | Per requirement |
-|---|---:|---:|---|---:|
-| FLUX-pool prompts (long, descriptive) | 312 | 5.1 | 731 / 588 / 3,090 / 5,321 | 144 |
-| DiffusionDB | 144 | 4.3 | 748 / 554 / 4,200 / 5,499 | 185 |
-| benchmarks (GenEval 2, DPG, ConceptMix, CompBench, CoReBench) | 144 | 8.9 | 1,394 / 1,024 / 4,628 / 4,826 | 165 |
-| R2I-Bench | 708 | 6.0 | 1,730 / 1,412 / 5,797 / 28,580 | 296 |
-| T2I-CoReBench reasoning | 139 | 7.1 | 2,223 / 1,477 / 14,257 / 21,087 | 336 |
-
-Longer checklists explain little of it: on the main task, output is about 74 + 141 tokens per requirement, which
-predicts 942 tokens at the reasoning checklists' length; they write 1,811. R2I-Bench's mathematical and
-compositional categories and CoReBench's logical and abstract dimensions average 2,800-3,600.
-
-![Share of responses longer than a given length](figures/chain_lengths.png)
-
-The tail matters more than the mean. Five of the 847 chains (0.6%) ran to the 16,384-token output limit, and all
-five were loops: every 8-word phrase in their last 2,000 words had appeared earlier in the same chain. In the
-capture run (no drafts, 874 s) they were among the first requests admitted and ran for 577-730 s each; a capped
-reply has no answer, so all five were retried from scratch, and the last retry was the final 181 s of the batch.
-None of the 600 main-task chains came near the limit.
-
-Speculative decoding helps here, because a loop is easy to predict: in the tail the n-gram drafts averaged
-2.0-2.7 tokens per step on these chains (1.7-2.0 on main-task batches). Simulated on the captured chains, the
-shipped tail-only drafts cut the batch by 19%, and more aggressive drafting (on below 64 or 96 running, longer
-drafts as the batch empties) only 2-4% more; admitting the longest chains first, with perfect knowledge of their
-length, would gain 2-4%.
-
-The better fix is to stop the loop. vLLM 0.32 takes a per-request `thinking_token_budget`; when it runs out, the
-server writes the profile's closing line (`reasoning-config`), ending the reasoning, and the model answers. On
-the 847 reasoning images, with everything else the same:
-
-| | Without budget | Budget 8,192 tokens | Paired difference |
-|---|---:|---:|---:|
-| Batch time | 641 s | 530 s | -17% |
-| Chains cut short / capped and retried | 0 / 5 | 6 / 0 | |
-| Statements vs Sol | 81.7 | 81.7 | +0.1 [-0.2, +0.4] |
-| Full image vs Sol | 92.8 | 92.4 | -0.4 [-0.8, +0.0] |
-| Statements vs Gemini 3.1 Pro (582) | 79.9 | 79.9 | +0.1 [+0.0, +0.2] |
-| Statements vs the audit (123) | 80.5 | 80.5 | -0.0 [-1.3, +1.2] |
-
-![Requests running on the 847 reasoning images, with and without the budget](figures/budget_tail.png)
-
-The budget is the default in the quality mode. It is a trade, not a free win: on reasoning-heavy sets, a larger
-budget (`--thinking-budget 16384`) or none (`-1`) may buy a few tenths of a point of full-image agreement (+0.4
-here, not significant) for about 20% more batch time; on main-task prompts it changes nothing.
-
-## Both modes against vLLM's defaults
-
-The ladder starts from vLLM's defaults on the BF16 model, so its 5.6x includes the move to FP8 weights. To isolate
-the server settings, each judge also ran on the 1,000 round-3 held-out images with its own FP8 checkpoint, client
-and requests in flight, on vLLM's defaults plus only the flags needed to start (a context length, image-only
-inputs, the multimodal cache off; for the Thinking model also the reasoning parser and the budget's closing line):
-
-| Judge | vLLM defaults | Shipped profile | Speedup | Statements vs Sol, shipped minus defaults |
-|---|---:|---:|---:|---:|
-| fast mode, 256 in flight | 665 s | 431 s | 1.54x | -0.4 [-1.3, +0.4] |
-| single call (Instruct), 256 in flight | 226 s | 177 s | 1.28x | +0.0 [-0.4, +0.4] |
-| quality mode, 128 in flight | 815 s | 497 s | 1.64x | -0.2 [-0.9, +0.4] |
-
-Agreement is the paired difference on the main-task images both runs judged (798 for the fast mode, 792 for the
-single call, 800 for the quality mode). The shipped profiles re-decide 2-7% of statements (the FP8 KV cache,
-FlashInfer and the fused kernels change numerics) without moving agreement with Sol or the audit.
-
-## Long checklists
-
-The neutral judge used to give every request a fixed 2,048 output tokens, and the fast profile a 6,144-token
-context. On checklists of 24-50 statements (T2I-CoReBench's text-rendering prompts) the compile or observe answer ran
-past the limit on all three attempts, and the image got no verdict: 6 of the 800 held-out main-task images, 5 of the
-5,108 development images, and one or two of each 1,000-image batch in the ladder. Each request may now write 128
-tokens per statement (at least 2,048, so nothing changes up to 16 statements), and the context is 16,384 tokens: a
-decide request for 50 statements carries all 50 observations (the largest on development data needed 8,448).
-
-On 300 development images, 87 of them with more than 16 statements, on one server and in one batch, the fixed judge
-judged all 87 twice and the old one 79. On the 79 both judged, 3.5% of statements changed (0.6% between the two runs
-of the fixed judge), statement agreement with Sol did not move (-0.0 points [-1.0, +1.0]) and full-image agreement
-rose by 3.8 [+0.0, +8.9]; on the shorter checklists, 99.9% of verdicts stayed the same. On the held-out set the fast
-mode now judges 998 of the 1,000 images: a 32-statement checklist still runs past its 4,096 tokens on every attempt,
-and one plan keeps failing the leak check (docs/design.md). On the 794 main-task images both versions judged,
-agreement with Sol moved by -0.2 points [-0.7, +0.3]. The larger context re-decides about 3% of statements on the
-held-out set, as other serving changes do (the single call, whose judge did not change, re-decides 3.0%), without
-moving agreement.
-
-Judging the long checklists in full costs time: they make long chains of requests, and in input order they come late
-in the batch. The 1,000 held-out images take 431 s instead of 389 s, and on vLLM's defaults 665 s instead of 591 s;
-on the 300 development images, the fixed judge was 7% slower on the same node, and the larger context alone made no
-difference. Starting the longest checklists first (`--objective makespan`) does not win the time back: on 1,000
-images of the throughput mix the batch took 409 s against 398 s in input order (399 s on a repeat), and on the
-held-out set 473 s against 433 s; it shortens the last 10% of the batch and delays the rest. The ladder and
-scale-out runs above and the RL steps below were measured before this change.
-
-## RL-sized batches
-
-
-An RL step submits its batch and waits for every reward, so its time is the batch's tail.
-
-Fast mode, time to the last verdict (mean of 3 runs), on in-family prompts / the new prompt styles (FLUX-pool
-prompts and R2I-Bench):
-
-| Setup | 8 images | 16 | 32 | 64 |
-|---|---:|---:|---:|---:|
-| no drafts | 42 / 23 s | 52 / 27 s | 60 / 35 s | 78 / 53 s |
-| n-gram drafts | 22 / 17 s | 23 / 24 s | 33 / 45 s | 44 / 59 s |
-| EAGLE-3 head (FlashAttention) | 20 / 13 s | 21 / 15 s | 28 / 23 s | 46 / 37 s |
-
-n-gram drafts help on in-family prompts and hurt on the new styles from 32 images up; the EAGLE-3 head is the
-fastest everywhere except 64 in-family images, where n-gram is 2 s ahead.
-
-Quality mode, median (worst) over 6 batches of 64 and 4 batches of 16 different images:
-
-| Setup | 16 images | 64 images |
+| 600 development images, one H100 | `fast` judge | `quality` judge (medium + strict) |
 |---|---:|---:|
-| no drafts | 42 s (46 s) | 75 s (96 s) |
-| GPU n-gram drafts always | 26 s (34 s) | 60 s (145 s) |
-| **+ thinking budget, 8,192 tokens (`quality_rl` profile)** | **24 s (33 s)** | **54 s (80 s)** |
-| GPU suffix decoding always (PR #60339 port, no budget) | 20 s (33 s) | 59 s (114 s) |
-| GPU suffix + adaptive verification (FlashAttention, no budget) | 21 s (22 s) | 55 s (145 s) |
+| vLLM's recipe for the model (FP8 KV cache, 3 draft tokens, 128 requests), prefix caching off | 115 s | 369 s (65 requests evicted and restarted) |
+| + 16-bit DeltaNet state, at most 64 requests at once | 100 s | 184 s |
+| + the output layer in FP8 | 99 s (anchor 103) | 177 s (anchor 185) |
+| + the longest checklists first | 104 s (anchors 110, 106) | 171 s (anchors 182, 178) |
+| + the top-k / top-p mask in three passes | (greedy: no mask) | 175, 177 s (anchors 170, 184); steady state 3.23 against 3.03 images/s |
 
-Without a budget, one runaway chain sets the step's time: 96-145 s in the worst steps above, and up to 302 s
-with FlashAttention and no drafts. The budget bounds that: the same images and seeds as the n-gram row, with
-the 145 s step down to 57 s. Agreement with Sol stayed at 91-93% of statements throughout.
+Each later row was measured against its own anchor in the same job, shown in brackets; the earlier rows are from
+another node. vLLM's own defaults do not start on this model (1,024 sequences against 824 slots for the recurrent
+state); with the sequence cap lowered to 512 so they start, they evicted and restarted 626 requests in one thinking
+batch and took 1.8x the time of the 16-bit state with the cap of 64 (560 s against 317 s, at the model's default
+reasoning effort).
 
-## Reproducing
+The 16-bit state and the cap only work together. With 16-bit state alone the server admits more requests than its
+cache holds and evicts them; the cap alone just runs fewer. Together: 30% more generated tokens per second (2,809
+against 2,165 for the anchor in the same job) on the thinking judge, 10% more prompt tokens per second on the fast
+one, and no evictions.
 
-The scripts in `experiments/` produced every number above; each documents its own arguments.
+### Where the time goes, and the speed of light
 
-- `experiments/throughput/sweep.py` and `makespan.py`: closed-loop sweeps and batch timing for a server profile.
-- `experiments/quality/run.py` and `analyze.py`: judges on one server, then agreement tables.
-- `experiments/kernels/`: kernel benchmarks, the Triton GEMM, and server profiles.
-- `experiments/speculator/`: traces, hidden states and the EAGLE-3 training split.
-- `experiments/ladder.py`: [ladder.md](ladder.md).
+![Where the 27B quality judge's time goes](figures/where_time_goes.png)
+
+[roofline.md](roofline.md) has the method, the checks on it and the measured kernel ceilings. In short,
+`experiments/qwen38/roofline.py` counts a run's work from its own counters (2 FLOPs per weight per token for every
+linear layer, attention over the context, the DeltaNet recurrence, the draft head, the vision tower; per engine step
+every weight read once, the KV cache, and the DeltaNet state with its per-draft copies) and sets it against the
+H100's peaks: 1,979 TFLOP/s for FP8, 3.35 TB/s from memory. The speed of light is all of that work at peak, every
+step full. No real schedule reaches it.
+
+| 27B, held-out timing run | batch | speed of light | measured / floor | MFU | MBU |
+|---|---:|---:|---:|---:|---:|
+| `quality` | 295 s | 80 s (80 s of FLOPs, 76 s of bytes) | 3.7x | 26% | 26% |
+| `fast` | 177 s | 57 s (57 s of FLOPs, 23 s of bytes) | 3.1x | 31% | 13% |
+
+The GPU is busy 97% of the time; busy is not fast. Every kernel of a 600-image quality batch, profiled with Nsight
+Systems, against the same work at the datasheet roofline and at what the same kernels reach alone at the batch's
+shapes (`experiments/qwen38/ceilings.py`):
+
+| Kernel class, 27B `quality`, 600 images | GPU time | at the roofline | at the kernels' measured ceiling |
+|---|---:|---:|---:|
+| FP8 matmuls | 81 s | 41 s | 73 s |
+| DeltaNet recurrence | 29 s | 17 s | 22 s |
+| attention (FlashAttention 3, FP8 KV cache) | 14 s | 3.5 s | 9 s |
+| sampling (top-k / top-p over 248,320 tokens) | 2 s (9 s with vLLM's mask) | | 2 s |
+| vision tower (BF16) | 8 s | 4 s | |
+| kernels the model does not count (activation quantization, norms, copies) | 25 s | | |
+| GPU idle | 7 s | | |
+
+- **The matmuls** run at 90% of what their kernels (DeepGEMM; FlashInfer's below 32 rows) reach at these shapes. A
+  decoding step at the cap is 64 requests x 4 verified tokens = 256 rows, right at the H100's ridge point for FP8
+  weights (about 295), where the matmuls reach about half of the FP8 peak; long prompt chunks reach 57-72%.
+- **DeltaNet** is memory-bound by design (6 FLOPs per byte), and 78% of its kernel's bytes are state writes: vLLM
+  keeps one 1.5 MB state per layer per request per draft position, so that any number of accepted draft tokens can
+  be rolled forward. The three writes beyond the one a step needs are about 60% of the bytes. A kernel that writes
+  the state once a step was correct but slower (below).
+- **Attention** is at 66% of its kernel's ceiling, but the ceiling is low: FlashAttention 3 reaches about 40% of the
+  bandwidth for 4 KV heads of 256 with an FP8 cache; FlashInfer's kernels do worse or do not build for this layout.
+- **Sampling** was far from its ceiling: once the answer's JSON grammar has set most of the vocabulary to -inf,
+  vLLM's top-k / top-p kernel takes 2.7 ms a call instead of 0.3-0.8 (its threshold search depends on the values).
+  Our plugin (`kernels/topk_topp.py`) finds the same thresholds in three passes whose cost does not: 0.38 ms a step,
+  1.1 s of the batch instead of 7.8. In steady state that is 7% more images per second; a batch's time does not show
+  it beyond the run-to-run noise ([roofline.md](roofline.md#what-was-fixed-and-what-was-not)).
+
+For the quality batch more than half the gap to the speed of light (57%; 53% without the vision tower, whose kernels
+were not measured alone) is out of reach for these kernels at these batch shapes; about a sixth is kernels below their
+ceiling, and a quarter kernels the model does not count and the GPU waiting
+([roofline.md](roofline.md#where-a-whole-batch-goes)).
+
+### How many requests at once
+
+![Images per second and time per image against the cap](figures/requests_in_flight.png)
+
+Steady state at 192 images in flight, the server's cap swept (ladder part `27b_k`):
+
+| Cap | `fast` images/s | time per image | `quality` images/s | time per image |
+|---:|---:|---:|---:|---:|
+| 32 | 5.46 | 6 s | 2.48 | 13 s |
+| 48 | 5.70 | 8 s | 2.76 | 17 s |
+| **64** | **5.94-5.97** | **11 s** | **3.05-3.12** | **20-21 s** |
+| 80 | 5.90 | 13 s | 2.93 | 27 s |
+| 96 | 6.06 | 15 s | 3.12 | 29 s |
+| 128 | 6.05 | 15 s | 3.12 | 29 s |
+
+Past 64 the 27B gains at most 2% while each image takes about 1.4x as long, and above about 90 the cache is full
+(26-56 requests evicted; at 95% of GPU memory, 96 ran with 15 evictions on the quality judge). 64 is the knee.
+
+### Draft tokens
+
+The checkpoint's own MTP head proposes 3 tokens per step; the server verifies them in the same forward pass. It is
+worth about 40% to the 27B's thinking judge at its default effort (2,250 against 1,600 generated tokens per second
+without drafts) and accepts
+about 3.1 tokens per step of a possible 4. Longer drafters (DFlash2 and DSpark with 7 draft tokens) keep about 0.9
+more tokens per step, but at 54 requests in flight the step is compute-bound and checking 8 positions instead of 4
+costs more than it saves: 22-25% slower.
+
+## Qwen3.8-Flash-Next on two H100s
+
+| 600 development images | `flash-fast` judge | `flash-quality` judge |
+|---|---:|---:|
+| development settings (85% memory, 128 sequences, prefix caching on) | 102 s | 202 s |
+| prefix caching off | 99 s | 196 s |
+| + 16-bit DeltaNet state, at most 64 | 99 s | 170 s |
+| + 92% of GPU memory, at most 96 | 80-81 s (anchor 91) | 150-154 s (anchor 195) |
+| + the longest checklists first | 75 s (anchors 81, 79) | 139 s (anchors 165, 156) |
+| + 112 requests for `flash-fast` | 73-75 s (anchor 78) | (144-149 s against 142 s: kept at 96) |
+
+The held-out run of 2026-10-30 used the third row's settings (288 s and 154 s for 1,000 images); the timing run of the
+release, with the last row's, took 249 s and 121 s. Their speeds of light, at their caps of 96 and 112 requests, are
+56 s for `flash-quality`, bound by memory (the experts each step's tokens route to), and 15 s for `flash-fast`, where
+FLOPs and bytes take about as long: 4.5x and 8.0x. A profile of `flash-quality` at 64 in flight: the 4-bit expert
+matmuls 26% of GPU time, the 16-bit dense matmuls 19%, all-reduce between the two GPUs 15%, the hyper-connection
+stream mixing 8%, attention 7%, DeltaNet 6%, sampling 5%, routing 3%; the GPUs idle 5% of the time (16% for
+`flash-fast`), mostly host work inside the forward pass, in the parts Flash-Next runs outside CUDA graphs (its graphs
+break around its custom layers).
+
+Steady state, tensor parallel at 92% (ladder part `flash_g`): 6.25 / 2.94 images/s (fast / quality) at a cap of 48,
+6.78 / 3.22 at 64, 7.49-7.69 / 3.58-3.67 at 96, 8.39 / 3.83 at 112 and 8.39 / 3.37 at 128, with the time per image
+almost flat from 96 to 112. In batches, where the quality judge's time is set by its last long chains, 112 helped
+only `flash-fast` (73-75 s against 78 s; quality 144-149 s against 142 s), so the two modes start their servers
+with different caps.
+
+## The batch's tail
+
+![Requests running over one batch, in input order and with the longest checklists first](figures/batch_tail.png)
+
+A batch ends with a few long requests on an emptying GPU. From per-request logs, the share of a 600-image batch with
+fewer requests running than the cap: 4-5% (27B fast), 13-14% (27B quality), 7% (`flash-fast`) and 23-26%
+(`flash-quality`); judged as five batches of 120, 28-64%, and the batches took 17-41% longer than one batch of 600.
+
+**The longest checklists first.** The client starts images in order of checklist length (statements, then
+characters) and admits requests of images already started before new ones. It cuts the 600-image batches by 4-5%
+(27B) and 6-13% (Flash-Next), and the time with the GPU not full to 1% (fast) and 6-10% (quality), with verdicts
+changing no more than between two identical runs (2.3% / 4.2% of statements on the 27B against 2.2% / 4.2% between
+reruns). It is the default (`--objective makespan`); `--objective latency` keeps input order.
+
+**Caps on reasoning and on the answer.** Of 19,023 reasoning chains in the development runs, the longest ran 8,382
+tokens with its answer and none came near the 32,768-token limit. But one is enough: in a 27B run on the 847 reasoning
+images through the CLI, a single request ran for the last ~160 s of a 467 s batch, alone on the GPU at 70-250 tokens
+per second. The quality modes send vLLM's `thinking_token_budget` of 8,192 tokens; when it runs out, the server ends
+the reasoning with the profiles' closing line ("Considering the limited time, I have to give the final answer based on
+my thinking so far.") and the model answers. With a 64-token budget in a test, every one of 16 answers still parsed.
+
+The budget did not stop the next one: in a 600-image run with it, one request again ran alone for ~150 s (about
+33,000 tokens at 190-250 tokens per second), so the loop was in the answer, after the reasoning. Ladder part `27b_n`
+ran the quality judge twice on the 600 regular and the 847 reasoning images with log-probabilities requested, without
+them, and with the budget: 8,719 chains, none looped (the longest 8,426 tokens), and the budget cost nothing
+measurable (174-175 and 309-348 s against 173-175 and 318-335 s). Loops are rare, 2 in about 30,000 chains here,
+which is still about one 1,000-image batch in 15. So the answer is bounded too: the whole output at most the
+reasoning budget plus 2,048 tokens and 200 per statement (12,240 tokens for a 10-statement checklist, instead of
+32,768), and an answer cut there is asked again with a note to keep each evidence to one short sentence. Of 207,461
+answers on record, the closest came to a third of its bound. A cap on each evidence string in the schema (JSON
+Schema's `maxLength`) would have stopped a looping string sooner, but with any such bound xgrammar 0.2.8 builds each
+token's mask about ten times slower (224 against 21 µs on the CPU), and the GPU waited on it: 67% busy on the fast
+judge and 143-148 s for the 600 images instead of about 105.
+
+**More draft tokens as the batch empties** would use the idle GPU, and vLLM can switch the draft length by the
+number of requests running. On the 27B, 5 draft tokens at 16 or fewer running accepted 4.2 tokens per step against
+3.4, but vLLM keeps the state copies for the longest draft for every request all batch long: 37 requests ran instead
+of 55, and the thinking batch took 279 s against 182 s. With 7 the server failed. On Flash-Next both failed to
+start (with 5: "QSA ring capacity 12 must divide the attention block size 1696", a constraint of its sparse
+attention).
+
+## Tokens per second and latency per request
+
+How each figure is counted:
+
+- **Whole batch** (the tables in README.md and results.md): the server's token counters over a batch of the 1,000
+  held-out images, divided by the batch's time from the first request sent to the last answer back. Server start-up
+  is not in it (about 2 minutes for the 27B and 4 for Flash-Next, before the clock starts); prefill and the batch's
+  tail are. Generated tokens include thinking tokens, prompt tokens include the image's (about 1,000), and per GPU
+  divides Flash-Next's total by its two GPUs.
+- **Steady state** (`figures/requests_in_flight.png` and the request-cap sweeps): the same counters over 180-240 s
+  with 192 images in flight, after 90-120 s of warm-up, so neither the start nor the tail is in it.
+- **Per request** (vLLM's own per-request metrics, in its benchmark's terms): time to first token, from the request's
+  arrival, so it includes time in the queue; time per output token, a request's decode time over its output tokens
+  (prefill excluded), whose inverse is the request's decode speed; and inter-token latency, the time between a
+  request's successive outputs (with three draft tokens a step can give it up to four tokens). Under a full batch
+  these were measured once per mode on the 600 development images, with the shipped settings and finer histogram
+  buckets than vLLM's defaults so the percentiles resolve; one image at a time, from the 30 images of the timing run.
+
+| Under a full batch, 600 development images | batch | decode speed per request: 1 / mean, median, slowest 5% (tokens/s) | time per output token: mean, median, p95 (ms) | time to first token: mean, p95 (s) | of which queued (mean, s) | prefill: median, p95 (s) | inter-token latency, median (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `fast` | 105 s | 29, 29, 21 | 35.0, 34.5, 48.1 | 27.3, 38.5 | 24.6 | 0.39, 1.15 | 89 |
+| `quality` | 173 s | 46, 45, 36 | 21.8, 22.2, 27.6 | 16.8, 30.7 | 15.4 | 0.23, 1.15 | 36 |
+| `flash-fast` | 78 s | 25, 26, 18 | 39.4, 38.9, 54.3 | 15.7, 28.0 | 12.9 | 0.25, 0.51 | 144 |
+| `flash-quality` | 146 s | 39, 38, 30 | 25.9, 26.0, 32.8 | 7.5, 14.7 | 6.6 | 0.15, 0.48 | 42 |
+
+Under a full batch each request decodes at 25-46 tokens per second, because 64-112 requests share every step; the
+whole-batch tables show what the server does in total. Time to first token there is mostly queueing: the client
+keeps more requests in flight than the server runs, so a waiting request starts the moment a slot frees. The fast
+modes decode more slowly per request than the quality modes because their steps carry more prompt prefill (their
+answers are short, so prompts are a larger share of each step: 82% of the fast batch's matmul FLOPs are prompts,
+[roofline.md](roofline.md#the-model)).
+
+One image at a time (30 development images, the timing run): time to first token 0.27-0.28 s for all four modes, and
+decode speeds of 228 (`fast`), 198 (`quality`), 308 (`flash-fast`) and 240 (`flash-quality`) tokens per second, with
+the draft head adding up to three tokens a step; an answer takes 1.3-4.0 s.
+
+## What was tried and not kept
+
+| | Result |
+|---|---|
+| **27B** | |
+| Prefill chunks of 16k or 4k tokens | 177-178 s against 179-192 s for the anchors: within noise |
+| Requests without a per-request seed; FlashInfer's sampler | no reliable gain (vLLM's model runner V2 uses its own sampler either way) |
+| FlashInfer attention; FlashAttention with up to 128 KV splits | 111 / 181 s and 108 / 177 s against the anchors' 109-110 / 179-187 s |
+| 4-bit weights (RedHat INT4, Machete kernel) | 10-20% slower: unpacked to 16-bit inside the matmul, half the FP8 tensor-core rate |
+| DFlash2 (3 or 7 draft tokens) and DSpark (7) drafters | DFlash2 with 3: 103 / 195 s against the built-in head's 103 / 189 s; with 7, DFlash2 and DSpark 22-25% slower on the quality judge (231-237 s) |
+| 5 or 7 draft tokens as the batch empties | slower or failed (above) |
+| A Triton kernel that writes the DeltaNet state once a step and keeps the accepted window's inputs in a ring, replaying them next step (like vLLM's ReplaySSM for Mamba2) | correct with vLLM's per-draft state blocks kept (verdicts within rerun noise), but 3-6% slower (111-112 / 180-184 s against 105-108 / 173-176 s); with one state block per request, to also free the memory, it gave wrong tokens under load and the cause was not found. Not in the package |
+| Top-k / top-p mask from the 64 largest logits | same tokens kept; 164-175 s against 174-175 s (the three-pass mask replaced it) |
+| vLLM's fusions of RMSNorm and SiLU-and-multiply into the next matmul's FP8 quantization | nothing to fuse while the matmul quantizes inside its own op; on vLLM's DeepGEMM-only path the activation fusion matches, but that path is 3% slower on the fast judge (5.72 against 5.94 images/s) and the fusion does not win it back (5.71-5.74) |
+| A 4,000-character bound on each evidence string (the schema's `maxLength`) | xgrammar's token masks 10x slower; the GPU waited on them: 143-148 s against about 105 s on the fast judge |
+| **Flash-Next** | |
+| torch.compile on | 94 / 179 s against 93 / 173-179 s |
+| The dense layers in block FP8 | 143 / 188 s alone (its first rung, with new matmul shapes compiling), 105 / 194 s with the FP8 output layer, against 103 / 191 s and 105 / 204 s |
+| Two replicas (data parallel, experts shared) instead of one across both GPUs | steady state: +2-11% fast, -4-10% quality; batches 80 / 169 s against 73-78 / 142-149 s |
+| 95% of GPU memory, 128 requests | failed to start with 3 draft tokens; with 2, 78 / 153 s: a tie |
+| The top-k / top-p mask from the 64 largest logits | 155-156 s against 151-152 s |
+| The three-pass top-k / top-p mask | steady state 3.37 and 3.90 against 3.53 and 3.68 images/s: no gain beyond noise |
+
+## Measuring
+
+- A batch is judged with every image submitted at once; times exclude server start-up (about 2 minutes for the 27B,
+  4 for Flash-Next).
+- Verdict changes are the check that a serving change is only a serving change: identical runs flip 2.1-2.6% of
+  greedy statement verdicts and 3.7-5.6% of sampled ones, and the kept changes flipped 2.3-2.8% and 4.2-5.4%. The
+  greedy figures are the written verdicts; with the fast modes' cut-offs applied (many probabilities sit near them),
+  identical runs flip 2.7-3.3% (Flash-Next, 0.998) and 4.0-5.0% (27B, 0.999), the kept changes 2.9-3.8% and 4.6-5.4%.
+- Settings were compared inside one job, with the anchor repeated at the end. The same Flash-Next settings measured
+  6.4 and 8.1 images/s on two nodes (the GPUs equally clocked, but busy 77% against 89% of the time: host work)
+  and 8.14 and 8.22 inside one job.
+- `experiments/qwen38/ladder.py` runs settings one after another on the same images (`ladders/` has every one, with
+  the reason it was run in its header; parts J-J5, M, `flash_c` and `flash_k` used kernels that are not in the
+  package, and G, Q, Q2, `flash_l` and `flash_l2` are void, their headers say why); `profile_gpu.py` profiles a server
+  under load and sums GPU time by kernel class; `roofline.py` turns a run's counters into MFU, MBU and the speed of
+  light, and with a whole-batch kernel summary (`nsys_summary.py`) and the kernel ceilings (`ceilings.py`), the split
+  of a batch's time described in [roofline.md](roofline.md).
+
+```bash
+python experiments/qwen38/ladder.py --ladder experiments/qwen38/ladders/27b_k.yaml --model <checkpoint> \
+    --items <items folder> --out <results>/27b_k
+python experiments/qwen38/roofline.py --model Qwen/Qwen3.8-27B-FP8 --run <results>/final_27b/heldout \
+    --judge think_medium_strict
+python experiments/qwen38/ceilings.py --out <results>/ceilings.json
+python experiments/qwen38/nsys_summary.py <capture>.sqlite --out <results>/quality_summary.json
+python experiments/qwen38/roofline.py --model Qwen/Qwen3.8-27B-FP8 --stats <out>/dev600_quality.jsonl.stats.json \
+    --kernels <results>/quality_summary.json --ceilings <results>/ceilings.json
+```
